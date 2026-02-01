@@ -23,6 +23,7 @@
 #   --smoke             Run only smoke tests (quick validation)
 #   --slow              Include slow tests (processing, recommendations)
 #   --extended          Run E2E tests INCLUDING extended (summary tables, Kruize)
+#   --multi-cluster N   Run multi-cluster tests with N clusters (default: 3)
 #   --all               Run all tests including extended (overrides default exclusions)
 #
 # Setup Options:
@@ -44,6 +45,7 @@
 #   ./run-pytest.sh --e2e --smoke           # Run E2E smoke tests
 #   ./run-pytest.sh --e2e                   # Run full E2E flow
 #   ./run-pytest.sh --extended              # Run full E2E flow INCLUDING extended tests
+#   ./run-pytest.sh --multi-cluster 5       # Run multi-cluster tests with 5 clusters
 #   ./run-pytest.sh --all                   # Run ALL tests including extended
 #   ./run-pytest.sh -k "test_jwt"           # Run tests matching pattern
 #   ./run-pytest.sh suites/helm/            # Run specific suite directory
@@ -207,6 +209,8 @@ main() {
     local pytest_extra_args=()
     local run_all=false
     local include_extended=false
+    local include_multi_cluster=false
+    local cluster_count=3
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -247,6 +251,15 @@ main() {
                 ;;
             --extended)
                 include_extended=true
+                shift
+                ;;
+            --multi-cluster)
+                include_multi_cluster=true
+                # Check if next argument is a number (cluster count)
+                if [[ $# -gt 1 && $2 =~ ^[0-9]+$ ]]; then
+                    cluster_count=$2
+                    shift
+                fi
                 shift
                 ;;
             --all)
@@ -297,12 +310,17 @@ main() {
 
     # Handle marker filtering
     if [[ "$run_all" == "true" ]]; then
-        # Run all tests, override the default -m "not extended" from pytest.ini
+        # Run all tests, override the default -m "not extended and not multi_cluster" from pytest.ini
         pytest_args+=("-m" "")
+    elif [[ "$include_multi_cluster" == "true" ]]; then
+        # Run multi-cluster tests with specified cluster count
+        # Override the default marker exclusion
+        log_info "Running multi-cluster tests with ${cluster_count} clusters"
+        pytest_args+=("-m" "multi_cluster" "--cluster-count" "$cluster_count")
     elif [[ "$include_extended" == "true" ]]; then
         # Run full E2E flow including extended tests
         # This runs the entire TestCompleteDataFlow class to ensure proper fixture setup
-        # Override the default -m "not extended" from pytest.ini
+        # Override the default -m "not extended and not multi_cluster" from pytest.ini
         pytest_args+=("-m" "" "suites/e2e/test_complete_flow.py::TestCompleteDataFlow")
     elif [[ ${#pytest_markers[@]} -gt 0 ]]; then
         local marker_expr

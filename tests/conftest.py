@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 import requests
@@ -24,6 +24,44 @@ pytest_plugins = ["suites.cost_management.conftest"]
 
 # Disable SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# =============================================================================
+# Pytest Hooks for CLI Options
+# =============================================================================
+
+
+def pytest_addoption(parser):
+    """Add custom command-line options for multi-cluster testing."""
+    parser.addoption(
+        "--cluster-count",
+        action="store",
+        type=int,
+        default=1,
+        help="Number of clusters to generate data for in multi-cluster tests (default: 1)",
+    )
+    parser.addoption(
+        "--cluster-prefix",
+        action="store",
+        type=str,
+        default="multi",
+        help="Prefix for generated cluster IDs in multi-cluster tests (default: multi)",
+    )
+
+
+@pytest.fixture(scope="session")
+def cluster_count(request) -> int:
+    """Get the number of clusters to generate from CLI option."""
+    count = request.config.getoption("--cluster-count")
+    if count < 1:
+        pytest.fail("--cluster-count must be at least 1")
+    return count
+
+
+@pytest.fixture(scope="session")
+def cluster_prefix(request) -> str:
+    """Get the cluster ID prefix from CLI option."""
+    return request.config.getoption("--cluster-prefix")
 
 
 # =============================================================================

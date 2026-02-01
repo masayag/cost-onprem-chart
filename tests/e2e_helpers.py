@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import requests
 
@@ -89,14 +89,53 @@ class NISEConfig:
     cpu_usage: float = DEFAULT_NISE_CONFIG["cpu_usage"]
     mem_usage_gig: float = DEFAULT_NISE_CONFIG["mem_usage_gig"]
     labels: str = DEFAULT_NISE_CONFIG["labels"]
+
+    @classmethod
+    def for_cluster(cls, index: int) -> "NISEConfig":
+        """Generate a unique NISEConfig for a specific cluster index.
+
+        Each cluster gets unique node names, namespaces, pod names, and resource IDs
+        to ensure data is distinguishable across clusters.
+
+        Args:
+            index: Zero-based cluster index (0, 1, 2, ...)
+
+        Returns:
+            NISEConfig with unique values for this cluster
+        """
+        # Vary resource values slightly per cluster for realistic differentiation
+        cpu_request_base = 0.5
+        mem_request_base = 1.0
+
+        return cls(
+            node_name=f"cluster-{index}-node-1",
+            namespace=f"cluster-{index}-namespace",
+            pod_name=f"cluster-{index}-pod-1",
+            resource_id=f"cluster-{index}-resource-1",
+            cpu_cores=2 + (index % 3),  # 2, 3, 4, 2, 3, 4...
+            memory_gig=8 + (index * 2),  # 8, 10, 12, 14...
+            cpu_request=cpu_request_base + (index * 0.1),  # 0.5, 0.6, 0.7...
+            mem_request_gig=mem_request_base + (index * 0.25),  # 1.0, 1.25, 1.5...
+            cpu_limit=1.0 + (index * 0.2),  # 1.0, 1.2, 1.4...
+            mem_limit_gig=2.0 + (index * 0.5),  # 2.0, 2.5, 3.0...
+            pod_seconds=3600,
+            cpu_usage=0.25 + (index * 0.05),  # 0.25, 0.30, 0.35...
+            mem_usage_gig=0.5 + (index * 0.1),  # 0.5, 0.6, 0.7...
+            labels=f"environment:test|app:e2e-cluster-{index}|cluster-index:{index}",
+        )
     
     def get_expected_values(self, hours: int = 24) -> Dict:
-        """Calculate expected values for validation tests."""
+        """Calculate expected values for validation tests.
+
+        Includes both cost management and ROS expected values.
+        """
         return {
+            # Resource identifiers
             "node_name": self.node_name,
             "namespace": self.namespace,
             "pod_name": self.pod_name,
             "resource_id": self.resource_id,
+            # Cost management expected values
             "cpu_request": self.cpu_request,
             "mem_request_gig": self.mem_request_gig,
             "hours": hours,
@@ -105,6 +144,16 @@ class NISEConfig:
             "expected_node_count": 1,
             "expected_namespace_count": 1,
             "expected_pod_count": 1,
+            # ROS expected values
+            "cpu_cores": self.cpu_cores,
+            "memory_gig": self.memory_gig,
+            "cpu_limit": self.cpu_limit,
+            "mem_limit_gig": self.mem_limit_gig,
+            "cpu_usage": self.cpu_usage,
+            "mem_usage_gig": self.mem_usage_gig,
+            "labels": self.labels,
+            # ROS expects at least 1 experiment per cluster
+            "expected_experiment_count": 1,
         }
     
     def to_yaml(self, cluster_id: str, start_date: datetime, end_date: datetime) -> str:
@@ -147,6 +196,55 @@ class SourceRegistration:
     source_name: str
     cluster_id: str
     org_id: str
+
+
+@dataclass
+class ClusterTestContext:
+    """Context for a single cluster in multi-cluster tests.
+
+    Contains all information needed to validate data for one cluster.
+    """
+    cluster_id: str
+    cluster_index: int
+    source_id: str
+    source_name: str
+    schema_name: Optional[str]
+    nise_config: "NISEConfig"
+    expected: Dict
+    start_date: datetime
+    end_date: datetime
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if cluster data is fully processed."""
+        return self.schema_name is not None
+
+
+@dataclass
+class MultiClusterResult:
+    """Result of multi-cluster data generation.
+
+    Contains contexts for all clusters and shared metadata.
+    """
+    clusters: List[ClusterTestContext]
+    namespace: str
+    db_pod: str
+    org_id: str
+    total_clusters: int
+    successful_clusters: int
+    failed_clusters: List[str]
+
+    @property
+    def all_successful(self) -> bool:
+        """Check if all clusters were successfully processed."""
+        return self.successful_clusters == self.total_clusters
+
+    def get_cluster(self, index: int) -> Optional[ClusterTestContext]:
+        """Get cluster context by index."""
+        for cluster in self.clusters:
+            if cluster.cluster_index == index:
+                return cluster
+        return None
 
 
 # =============================================================================
@@ -775,11 +873,11 @@ def cleanup_e2e_sources(
     prefix: str = "e2e-source-",
 ) -> int:
     """Clean up E2E test sources matching a prefix.
-    
+
     Returns number of sources deleted.
     """
     deleted = 0
-    
+
     try:
         result = exec_in_pod(
             namespace,
@@ -791,20 +889,382 @@ def cleanup_e2e_sources(
             ],
             container="sources-listener",
         )
-        
+
         if not result:
             return 0
-        
+
         sources = json.loads(result)
         for source in sources.get("data", []):
             source_name = source.get("name", "")
             source_id = source.get("id")
-            
+
             if source_id and source_name.startswith(prefix):
                 if delete_source(namespace, listener_pod, sources_api_url, source_id, org_id):
                     deleted += 1
                     time.sleep(1)  # Brief pause between deletions
     except Exception:
         pass
-    
+
     return deleted
+
+
+# =============================================================================
+# ROS Validation Utilities
+# =============================================================================
+
+
+def get_kruize_experiments_for_cluster(
+    namespace: str,
+    db_pod: str,
+    cluster_id: str,
+    kruize_user: str,
+    kruize_password: str,
+) -> List[Dict]:
+    """Get Kruize experiments for a specific cluster.
+
+    Kruize stores cluster information in the experiment_name field, which
+    includes the cluster_id as part of the experiment identifier.
+
+    Args:
+        namespace: Kubernetes namespace
+        db_pod: Database pod name
+        cluster_id: Cluster ID to filter by
+        kruize_user: Kruize database user
+        kruize_password: Kruize database password
+
+    Returns:
+        List of experiment dicts with id, experiment_name, cluster_name
+    """
+    # Kruize stores cluster_id in experiment_name field, not cluster_name
+    # The experiment_name format includes the cluster_id
+    query = f"""
+        SELECT experiment_id, experiment_name, cluster_name
+        FROM kruize_experiments
+        WHERE experiment_name LIKE '%{cluster_id}%'
+           OR cluster_name LIKE '%{cluster_id}%'
+    """
+    result = execute_db_query(
+        namespace, db_pod, "kruize_db", kruize_user, query, password=kruize_password
+    )
+
+    if not result:
+        return []
+
+    return [
+        {
+            "experiment_id": row[0],
+            "experiment_name": str(row[1]).strip() if row[1] else None,
+            "cluster_name": str(row[2]).strip() if row[2] else None,
+        }
+        for row in result
+    ]
+
+
+def get_kruize_recommendations_for_cluster(
+    namespace: str,
+    db_pod: str,
+    cluster_id: str,
+    kruize_user: str,
+    kruize_password: str,
+) -> List[Dict]:
+    """Get Kruize recommendations for a specific cluster.
+
+    Args:
+        namespace: Kubernetes namespace
+        db_pod: Database pod name
+        cluster_id: Cluster ID to filter by
+        kruize_user: Kruize database user
+        kruize_password: Kruize database password
+
+    Returns:
+        List of recommendation dicts
+    """
+    # Match cluster_id in experiment_name or cluster_name
+    query = f"""
+        SELECT r.id, e.experiment_name, e.cluster_name
+        FROM kruize_recommendations r
+        JOIN kruize_experiments e ON r.experiment_id = e.experiment_id
+        WHERE e.experiment_name LIKE '%{cluster_id}%'
+           OR e.cluster_name LIKE '%{cluster_id}%'
+    """
+    result = execute_db_query(
+        namespace, db_pod, "kruize_db", kruize_user, query, password=kruize_password
+    )
+
+    if not result:
+        return []
+
+    return [
+        {
+            "recommendation_id": row[0],
+            "experiment_name": str(row[1]).strip() if row[1] else None,
+            "cluster_name": str(row[2]).strip() if row[2] else None,
+        }
+        for row in result
+    ]
+
+
+def wait_for_kruize_experiments(
+    namespace: str,
+    db_pod: str,
+    cluster_id: str,
+    kruize_user: str,
+    kruize_password: str,
+    timeout: int = 240,
+    interval: int = 20,
+) -> bool:
+    """Wait for Kruize experiments to be created for a cluster.
+
+    Args:
+        namespace: Kubernetes namespace
+        db_pod: Database pod name
+        cluster_id: Cluster ID to filter by
+        kruize_user: Kruize database user
+        kruize_password: Kruize database password
+        timeout: Maximum wait time in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        True if experiments found, False on timeout
+    """
+    def check_experiments():
+        experiments = get_kruize_experiments_for_cluster(
+            namespace, db_pod, cluster_id, kruize_user, kruize_password
+        )
+        return len(experiments) > 0
+
+    return wait_for_condition(check_experiments, timeout=timeout, interval=interval)
+
+
+# =============================================================================
+# Multi-Cluster Data Generation
+# =============================================================================
+
+
+def generate_multi_cluster_data(
+    cluster_count: int,
+    namespace: str,
+    db_pod: str,
+    ingress_pod: str,
+    api_reads_url: str,
+    api_writes_url: str,
+    rh_identity_header: str,
+    org_id: str,
+    ingress_url: str,
+    jwt_auth_header: Dict[str, str],
+    cluster_prefix: str = "multi",
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> MultiClusterResult:
+    """Generate and upload data for multiple clusters sequentially.
+
+    This function:
+    1. Generates unique NISE configs for each cluster
+    2. Creates NISE data files for each cluster
+    3. Registers sources for each cluster
+    4. Uploads data packages for each cluster
+    5. Waits for processing completion for each cluster
+
+    Args:
+        cluster_count: Number of clusters to generate
+        namespace: Kubernetes namespace
+        db_pod: Database pod name
+        ingress_pod: Ingress pod name for API calls
+        api_reads_url: Koku API reads URL
+        api_writes_url: Koku API writes URL
+        rh_identity_header: X-Rh-Identity header value
+        org_id: Organization ID
+        ingress_url: Ingress upload URL base
+        jwt_auth_header: JWT authorization header dict
+        cluster_prefix: Prefix for cluster IDs (default: "multi")
+        start_date: Start date for data (default: 2 days ago)
+        end_date: End date for data (default: 1 day ago)
+
+    Returns:
+        MultiClusterResult with all cluster contexts
+    """
+    import requests
+    import tempfile
+    import shutil
+
+    # Default dates: 2 days ago to 1 day ago for 24 hours of data
+    now = datetime.utcnow()
+    if start_date is None:
+        start_date = (now - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if end_date is None:
+        end_date = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    clusters: List[ClusterTestContext] = []
+    failed_clusters: List[str] = []
+    successful_count = 0
+
+    print(f"\n{'='*60}")
+    print(f"MULTI-CLUSTER DATA GENERATION")
+    print(f"{'='*60}")
+    print(f"  Cluster count: {cluster_count}")
+    print(f"  Cluster prefix: {cluster_prefix}")
+    print(f"  Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    print(f"{'='*60}\n")
+
+    # Create session for uploads
+    session = requests.Session()
+    session.verify = False
+
+    for i in range(cluster_count):
+        cluster_id = generate_cluster_id(prefix=f"{cluster_prefix}-{i}")
+        nise_config = NISEConfig.for_cluster(i)
+        temp_dir = tempfile.mkdtemp(prefix=f"multi_cluster_{i}_")
+
+        print(f"\n  [{i+1}/{cluster_count}] Processing cluster: {cluster_id}")
+        print(f"       Node: {nise_config.node_name}")
+        print(f"       Namespace: {nise_config.namespace}")
+        print(f"       CPU request: {nise_config.cpu_request}")
+
+        try:
+            # Step 1: Generate NISE data
+            print(f"       [1/4] Generating NISE data...")
+            files = generate_nise_data(cluster_id, start_date, end_date, temp_dir, config=nise_config)
+
+            if not files["all_files"]:
+                print(f"       ERROR: NISE generated no files")
+                failed_clusters.append(cluster_id)
+                continue
+
+            print(f"       Generated {len(files['all_files'])} files")
+
+            # Step 2: Register source
+            print(f"       [2/4] Registering source...")
+            source_reg = register_source(
+                namespace=namespace,
+                pod=ingress_pod,
+                api_reads_url=api_reads_url,
+                api_writes_url=api_writes_url,
+                rh_identity_header=rh_identity_header,
+                cluster_id=cluster_id,
+                org_id=org_id,
+                source_name=f"multi-cluster-{i}-{cluster_id[:8]}",
+                container="ingress",
+            )
+            print(f"       Source ID: {source_reg.source_id}")
+
+            # Wait for provider
+            print(f"       [3/4] Waiting for provider...")
+            if not wait_for_provider(namespace, db_pod, cluster_id, timeout=180):
+                print(f"       ERROR: Provider not created")
+                failed_clusters.append(cluster_id)
+                continue
+            print(f"       Provider created")
+
+            # Step 3: Upload data
+            print(f"       [4/4] Uploading data...")
+            package_path = create_upload_package_from_files(
+                pod_usage_files=files["pod_usage_files"],
+                ros_usage_files=files["ros_usage_files"],
+                cluster_id=cluster_id,
+                start_date=start_date,
+                end_date=end_date,
+                node_label_files=files.get("node_label_files"),
+                namespace_label_files=files.get("namespace_label_files"),
+            )
+
+            upload_url = f"{ingress_url}/v1/upload"
+            response = upload_with_retry(session, upload_url, package_path, jwt_auth_header)
+
+            if response.status_code not in [200, 201, 202]:
+                print(f"       ERROR: Upload failed with {response.status_code}")
+                failed_clusters.append(cluster_id)
+                continue
+
+            print(f"       Upload successful: {response.status_code}")
+
+            # Wait for summary tables
+            schema_name = wait_for_summary_tables(namespace, db_pod, cluster_id, timeout=300)
+
+            if not schema_name:
+                print(f"       WARNING: Summary tables not populated (may still be processing)")
+
+            # Calculate expected values
+            actual_hours = 24  # Default assumption
+            expected = nise_config.get_expected_values(hours=actual_hours)
+
+            # Create cluster context
+            context = ClusterTestContext(
+                cluster_id=cluster_id,
+                cluster_index=i,
+                source_id=source_reg.source_id,
+                source_name=source_reg.source_name,
+                schema_name=schema_name,
+                nise_config=nise_config,
+                expected=expected,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            clusters.append(context)
+            successful_count += 1
+            print(f"       SUCCESS: Cluster {i} ready")
+
+        except Exception as e:
+            print(f"       ERROR: {e}")
+            failed_clusters.append(cluster_id)
+
+        finally:
+            # Clean up temp directory
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    print(f"\n{'='*60}")
+    print(f"MULTI-CLUSTER GENERATION COMPLETE")
+    print(f"{'='*60}")
+    print(f"  Successful: {successful_count}/{cluster_count}")
+    if failed_clusters:
+        print(f"  Failed: {', '.join(failed_clusters)}")
+    print(f"{'='*60}\n")
+
+    return MultiClusterResult(
+        clusters=clusters,
+        namespace=namespace,
+        db_pod=db_pod,
+        org_id=org_id,
+        total_clusters=cluster_count,
+        successful_clusters=successful_count,
+        failed_clusters=failed_clusters,
+    )
+
+
+def cleanup_multi_cluster_data(
+    result: MultiClusterResult,
+    ingress_pod: str,
+    api_writes_url: str,
+    rh_identity_header: str,
+) -> None:
+    """Clean up all data created by multi-cluster generation.
+
+    Args:
+        result: MultiClusterResult from generate_multi_cluster_data
+        ingress_pod: Ingress pod name
+        api_writes_url: Koku API writes URL
+        rh_identity_header: X-Rh-Identity header value
+    """
+    print(f"\n{'='*60}")
+    print(f"MULTI-CLUSTER CLEANUP")
+    print(f"{'='*60}")
+
+    for ctx in result.clusters:
+        print(f"  Cleaning cluster {ctx.cluster_index}: {ctx.cluster_id}")
+
+        # Delete source
+        if delete_source(
+            result.namespace,
+            ingress_pod,
+            api_writes_url,
+            rh_identity_header,
+            ctx.source_id,
+            container="ingress",
+        ):
+            print(f"    Deleted source {ctx.source_id}")
+
+        # Delete database records
+        if cleanup_database_records(result.namespace, result.db_pod, ctx.cluster_id):
+            print(f"    Cleaned database records")
+
+    print(f"{'='*60}\n")

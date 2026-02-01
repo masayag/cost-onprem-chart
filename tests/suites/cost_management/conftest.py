@@ -19,11 +19,15 @@ import requests
 
 from e2e_helpers import (
     DEFAULT_S3_BUCKET,
+    ClusterTestContext,
+    MultiClusterResult,
     NISEConfig,
     cleanup_database_records,
+    cleanup_multi_cluster_data,
     delete_source,
     ensure_nise_available,
     generate_cluster_id,
+    generate_multi_cluster_data,
     generate_nise_data,
     get_koku_api_reads_url,
     get_koku_api_writes_url,
@@ -423,5 +427,131 @@ def cost_validation_data(cluster_config, s3_config, jwt_token, ingress_url, org_
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
             print("  Cleaned up temp directory")
-        
+
+        print(f"{'='*60}\n")
+
+
+# =============================================================================
+# Multi-Cluster Validation Fixture
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def multi_cluster_validation_data(
+    cluster_config, s3_config, jwt_token, ingress_url, org_id, cluster_count, cluster_prefix
+):
+    """Generate data for multiple clusters - SELF-CONTAINED.
+
+    This fixture generates and uploads data for N clusters, where N is specified
+    by the --cluster-count CLI option. Each cluster gets unique NISE configuration
+    with different node names, namespaces, pod names, and resource values.
+
+    Usage:
+        pytest --cluster-count 3 -m multi_cluster
+
+    The fixture:
+    1. Generates unique NISE configs for each cluster (different resources)
+    2. Creates and registers sources for each cluster
+    3. Uploads data packages sequentially
+    4. Waits for Koku to process each cluster
+    5. Yields MultiClusterResult with all cluster contexts
+    6. Cleans up all test data on teardown (if E2E_CLEANUP_AFTER=true)
+
+    CLI Options:
+    - --cluster-count N: Number of clusters (default: 1)
+    - --cluster-prefix PREFIX: Prefix for cluster IDs (default: "multi")
+
+    Environment Variables:
+    - E2E_CLEANUP_BEFORE: Run cleanup before tests (default: true)
+    - E2E_CLEANUP_AFTER: Run cleanup after tests (default: true)
+    """
+    # Check cleanup settings
+    cleanup_before = os.environ.get("E2E_CLEANUP_BEFORE", "true").lower() == "true"
+    cleanup_after = os.environ.get("E2E_CLEANUP_AFTER", "true").lower() == "true"
+
+    # Check NISE availability
+    if not ensure_nise_available():
+        pytest.skip("NISE not available and could not be installed")
+
+    # Get required pods
+    db_pod = get_pod_by_label(cluster_config.namespace, "app.kubernetes.io/component=database")
+    if not db_pod:
+        pytest.skip("Database pod not found")
+
+    ingress_pod = get_pod_by_label(cluster_config.namespace, "app.kubernetes.io/component=ingress")
+    if not ingress_pod:
+        pytest.skip("Ingress pod not found")
+
+    # Use Koku API URLs
+    api_reads_url = get_koku_api_reads_url(cluster_config.helm_release_name, cluster_config.namespace)
+    api_writes_url = get_koku_api_writes_url(cluster_config.helm_release_name, cluster_config.namespace)
+    rh_identity = create_rh_identity_header(org_id)
+
+    result = None
+
+    try:
+        print(f"\n{'='*60}")
+        print("MULTI-CLUSTER VALIDATION TEST SETUP")
+        print(f"{'='*60}")
+        print(f"  Cluster count: {cluster_count}")
+        print(f"  Cluster prefix: {cluster_prefix}")
+        print(f"  Cleanup before: {cleanup_before}")
+        print(f"  Cleanup after: {cleanup_after}")
+
+        # Pre-test cleanup if enabled
+        if cleanup_before:
+            print("\n  [0] Pre-test cleanup...")
+            cleanup_old_cost_val_clusters(
+                cluster_config.namespace, db_pod, ingress_pod,
+                api_reads_url, api_writes_url, rh_identity
+            )
+            print("      Cleanup complete")
+
+        # Generate multi-cluster data
+        result = generate_multi_cluster_data(
+            cluster_count=cluster_count,
+            namespace=cluster_config.namespace,
+            db_pod=db_pod,
+            ingress_pod=ingress_pod,
+            api_reads_url=api_reads_url,
+            api_writes_url=api_writes_url,
+            rh_identity_header=rh_identity,
+            org_id=org_id,
+            ingress_url=ingress_url,
+            jwt_auth_header=jwt_token.authorization_header,
+            cluster_prefix=cluster_prefix,
+        )
+
+        if not result.clusters:
+            pytest.fail("No clusters were successfully created")
+
+        if not result.all_successful:
+            print(f"  WARNING: {len(result.failed_clusters)} clusters failed to process")
+
+        print(f"\n{'='*60}")
+        print("SETUP COMPLETE - Running multi-cluster validation tests")
+        print(f"{'='*60}\n")
+
+        yield result
+
+    finally:
+        print(f"\n{'='*60}")
+        if cleanup_after and result:
+            print("MULTI-CLUSTER VALIDATION TEST CLEANUP")
+            print(f"{'='*60}")
+
+            cleanup_multi_cluster_data(
+                result=result,
+                ingress_pod=ingress_pod,
+                api_writes_url=api_writes_url,
+                rh_identity_header=rh_identity,
+            )
+        else:
+            print("MULTI-CLUSTER VALIDATION TEST CLEANUP SKIPPED")
+            print(f"{'='*60}")
+            if result:
+                print(f"  Data preserved for {len(result.clusters)} clusters")
+                for ctx in result.clusters:
+                    print(f"    - {ctx.cluster_id}")
+
         print(f"{'='*60}\n")

@@ -170,19 +170,19 @@ def execute_db_query(
         
         cmd = env_prefix + [
             "psql", "-U", user, "-d", database,
-            "-t", "-A", "-F", "|",
+            "-t", "-A", "-F", "\t",
             "-c", query
         ]
-        
+
         result = exec_in_pod(namespace, pod_name, cmd, timeout=120)
         if not result:
             return None
-        
-        # Parse pipe-delimited output
+
+        # Parse tab-delimited output (tab is safer than pipe which appears in Kruize data)
         rows = []
         for line in result.strip().split("\n"):
             if line:
-                rows.append(tuple(line.split("|")))
+                rows.append(tuple(line.split("\t")))
         return rows
     except Exception:
         return None
