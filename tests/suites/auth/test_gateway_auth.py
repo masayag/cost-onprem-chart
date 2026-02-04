@@ -3,6 +3,12 @@ Gateway JWT authentication tests.
 
 Tests for JWT authentication on the centralized API gateway.
 The gateway handles all external API traffic with Keycloak JWT validation.
+
+Tests cover:
+- JWT authentication (valid/invalid/missing tokens)
+- Health endpoint exemptions (no auth required)
+- Rate limiting configuration
+- X-Rh-Identity header injection
 """
 
 import subprocess
@@ -15,7 +21,7 @@ import requests
 def _check_gateway_reachable(gateway_url: str, http_session: requests.Session) -> bool:
     """Check if gateway service is reachable."""
     try:
-        # Try the ingress ready endpoint through the gateway
+        # Try the ingress ready endpoint through the gateway (exempt from auth)
         response = http_session.get(f"{gateway_url}/ingress/ready", timeout=5)
         return response.status_code != 503
     except requests.exceptions.RequestException:
@@ -190,4 +196,165 @@ class TestGatewayJWTAuthentication:
         # Accept 200 (success), 404 (endpoint may not exist), but not 401/403
         assert response.status_code not in [401, 403], (
             f"Valid JWT token was rejected for sources API: {response.status_code}"
+        )
+
+
+@pytest.mark.auth
+@pytest.mark.integration
+class TestHealthEndpointExemptions:
+    """Tests for health check endpoints that bypass JWT authentication.
+
+    These endpoints are configured as exempt in both the jwt_authn filter
+    and the Lua filter to allow Kubernetes probes and health checks.
+    """
+
+    def test_ingress_ready_without_token(
+        self, gateway_url: str, http_session: requests.Session
+    ):
+        """Verify /api/ingress/ready is accessible without JWT token.
+
+        This endpoint is exempt from authentication to allow:
+        - Kubernetes readiness/liveness probes
+        - Load balancer health checks
+        - Basic connectivity verification
+        """
+        response = http_session.get(
+            f"{gateway_url}/ingress/ready",
+            timeout=10,
+        )
+
+        # Should not return 401/403 - this endpoint is exempt from auth
+        assert response.status_code not in [401, 403], (
+            f"Ingress ready endpoint should be exempt from auth, got {response.status_code}. "
+            "Check jwt_authn rules and Lua filter is_exempt_path() function."
+        )
+
+    def test_healthz_endpoint_returns_ok(
+        self, gateway_url: str, http_session: requests.Session
+    ):
+        """Verify /healthz endpoint returns 200 OK without authentication.
+
+        The /healthz endpoint is a direct response from Envoy (not proxied),
+        used for gateway-level health checks.
+
+        Note: This endpoint may not be accessible via the /api route prefix.
+        """
+        # Try the healthz endpoint - may need adjustment based on route config
+        response = http_session.get(
+            f"{gateway_url}/healthz",
+            timeout=10,
+        )
+
+        # If we get 404, the route may not expose /healthz externally
+        if response.status_code == 404:
+            pytest.skip("/healthz not exposed via external route")
+
+        assert response.status_code == 200, (
+            f"Health endpoint should return 200, got {response.status_code}"
+        )
+
+
+@pytest.mark.auth
+@pytest.mark.integration
+class TestRateLimiting:
+    """Tests for gateway rate limiting configuration.
+
+    The gateway uses a local rate limiter with:
+    - 1000 max tokens
+    - 100 tokens refilled per second
+    """
+
+    def test_rate_limit_header_present(
+        self, gateway_url: str, jwt_token, http_session: requests.Session
+    ):
+        """Verify rate limit header is present in authenticated responses.
+
+        The x-local-rate-limit header indicates the rate limiter is active.
+        """
+        response = http_session.get(
+            f"{gateway_url}/cost-management/v1/status/",
+            headers=jwt_token.authorization_header,
+            timeout=10,
+        )
+
+        # Skip if we get auth error (unrelated to rate limiting)
+        if response.status_code in [401, 403]:
+            pytest.skip("Authentication failed - cannot verify rate limit headers")
+
+        # Rate limit header should be present
+        assert "x-local-rate-limit" in response.headers, (
+            "Rate limit header 'x-local-rate-limit' should be present. "
+            "Verify envoy.filters.http.local_ratelimit is configured."
+        )
+
+    def test_requests_succeed_under_limit(
+        self, gateway_url: str, jwt_token, http_session: requests.Session
+    ):
+        """Verify multiple requests succeed when under rate limit.
+
+        The rate limit is 1000 tokens with 100/s refill, so a small
+        burst of requests should succeed.
+        """
+        success_count = 0
+        for _ in range(5):
+            response = http_session.get(
+                f"{gateway_url}/cost-management/v1/status/",
+                headers=jwt_token.authorization_header,
+                timeout=10,
+            )
+            if response.status_code not in [401, 403, 429]:
+                success_count += 1
+
+        assert success_count >= 4, (
+            f"At least 4 of 5 requests should succeed under rate limit, "
+            f"but only {success_count} succeeded"
+        )
+
+
+@pytest.mark.auth
+@pytest.mark.integration
+class TestIdentityHeaderInjection:
+    """Tests for X-Rh-Identity header injection by the Lua filter.
+
+    The Lua filter extracts claims from the JWT token (org_id, account_number,
+    username, email) and constructs an X-Rh-Identity header required by Koku.
+    """
+
+    def test_authenticated_request_reaches_backend(
+        self, gateway_url: str, jwt_token, http_session: requests.Session
+    ):
+        """Verify authenticated requests reach the backend successfully.
+
+        If X-Rh-Identity header is not properly injected, Koku will reject
+        the request with 401/403.
+        """
+        response = http_session.get(
+            f"{gateway_url}/cost-management/v1/sources/",
+            headers=jwt_token.authorization_header,
+            timeout=10,
+        )
+
+        # If X-Rh-Identity wasn't injected, Koku would return 401/403
+        assert response.status_code not in [401, 403], (
+            f"Request failed with {response.status_code}. "
+            "X-Rh-Identity header may not be injected correctly by Lua filter."
+        )
+
+    def test_ros_api_accessible_with_identity(
+        self, gateway_url: str, jwt_token, http_session: requests.Session
+    ):
+        """Verify ROS recommendations API is accessible with identity header.
+
+        The ROS API also requires X-Rh-Identity for tenant isolation.
+        """
+        response = http_session.get(
+            f"{gateway_url}/cost-management/v1/recommendations/openshift/",
+            headers=jwt_token.authorization_header,
+            timeout=10,
+        )
+
+        # Accept 200 or 404 (no recommendations yet), but not 401/403
+        assert response.status_code not in [401, 403], (
+            f"ROS API rejected request with {response.status_code}. "
+            "X-Rh-Identity may not be properly injected."
         )
