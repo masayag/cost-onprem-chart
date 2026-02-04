@@ -1,6 +1,8 @@
 {{- $keycloakUrl := .Values.jwtAuth.keycloak.url | default (include "cost-onprem.keycloak.url" .) }}
 {{- $issuerUrl := include "cost-onprem.keycloak.issuerUrl" . }}
 {{- $jwksUrl := include "cost-onprem.keycloak.jwksUrl" . }}
+{{- /* Extract hostname from Keycloak URL: strip protocol, port, and path */ -}}
+{{- $keycloakHost := $keycloakUrl | replace "https://" "" | replace "http://" "" | regexReplaceAll ":.*" "" | regexReplaceAll "/.*" "" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -99,12 +101,21 @@ data:
                   # =========================================================================
                   # ROUTING PRIORITY ORDER (Envoy uses first-match)
                   # =========================================================================
+                  # 0. Health check endpoint (no auth required)
                   # 1. ROS recommendations (most specific path, must match before /api/cost-management/)
                   # 2. Cost Management API - Read operations (GET, HEAD)
                   # 3. Cost Management API - Write operations (POST, PUT, DELETE, PATCH)
                   #    Note: Sources API is now part of Cost Management API at /api/cost-management/v1/sources/
                   # 4. Ingress (file upload)
                   # =========================================================================
+
+                  # 0. Gateway health check endpoint (for Kubernetes probes)
+                  - match:
+                      path: "/healthz"
+                    direct_response:
+                      status: 200
+                      body:
+                        inline_string: "OK"
 
                   # 1. ROS Recommendations - Route to ROS API service
                   # Must be before general /api/cost-management/ routes
@@ -204,10 +215,42 @@ data:
                       forward: true
                       payload_in_metadata: keycloak
                   rules:
+                  # Exempt health endpoints from JWT authentication
+                  - match:
+                      path: "/healthz"
+                    # No requires = bypass authentication
+                  - match:
+                      path: "/api/ingress/ready"
+                    # No requires = bypass authentication for ingress health check
                   - match:
                       prefix: "/"
                     requires:
                       provider_name: keycloak
+
+              # Local rate limiting filter to prevent API abuse
+              - name: envoy.filters.http.local_ratelimit
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                  stat_prefix: http_local_rate_limiter
+                  token_bucket:
+                    max_tokens: 1000
+                    tokens_per_fill: 100
+                    fill_interval: 1s
+                  filter_enabled:
+                    runtime_key: local_rate_limit_enabled
+                    default_value:
+                      numerator: 100
+                      denominator: HUNDRED
+                  filter_enforced:
+                    runtime_key: local_rate_limit_enforced
+                    default_value:
+                      numerator: 100
+                      denominator: HUNDRED
+                  response_headers_to_add:
+                  - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                    header:
+                      key: x-local-rate-limit
+                      value: "true"
 
               # Lua filter to extract JWT claims and inject X-Rh-Identity header
               - name: envoy.filters.http.lua
@@ -381,7 +424,7 @@ data:
                           end
                           -- If email not in JWT, generate from username
                           if not email or email == "" then
-                            email = username .. "@example.com"
+                            email = username .. "@noreply.local"
                           end
 
                           -- Build and encode X-Rh-Identity header
@@ -557,13 +600,13 @@ data:
             - endpoint:
                 address:
                   socket_address:
-                    address: {{ $keycloakUrl | replace "https://" "" | replace "http://" "" }}
+                    address: {{ $keycloakHost }}
                     port_value: {{ .Values.jwtAuth.keycloak.port | default 443 }}
         transport_socket:
           name: envoy.transport_sockets.tls
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-            sni: {{ $keycloakUrl | replace "https://" "" | replace "http://" "" }}
+            sni: {{ $keycloakHost }}
             common_tls_context:
               tls_params:
                 tls_minimum_protocol_version: TLSv1_2
@@ -581,8 +624,38 @@ data:
                 match_typed_subject_alt_names:
                   - san_type: DNS
                     matcher:
-                      exact: {{ $keycloakUrl | replace "https://" "" | replace "http://" "" }}
+                      exact: {{ $keycloakHost }}
 
+    # Overload manager to enforce resource limits and prevent resource exhaustion
+    # Note: downstream_connections resource monitor is not available in all Envoy versions
+    # Connection limits are enforced via connection_limit network filter instead
+    overload_manager:
+      refresh_interval: 0.25s
+      resource_monitors:
+      - name: envoy.resource_monitors.fixed_heap
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+          # Limit memory usage to 256MB (matches container limit)
+          max_heap_size_bytes: 268435456
+      actions:
+      - name: "envoy.overload_actions.shrink_heap"
+        triggers:
+        - name: "envoy.resource_monitors.fixed_heap"
+          threshold:
+            value: 0.95
+      - name: "envoy.overload_actions.stop_accepting_requests"
+        triggers:
+        - name: "envoy.resource_monitors.fixed_heap"
+          threshold:
+            value: 0.98
+      - name: "envoy.overload_actions.disable_http_keepalive"
+        triggers:
+        - name: "envoy.resource_monitors.fixed_heap"
+          threshold:
+            value: 0.90
+
+    # Note: Admin bound to 0.0.0.0 to allow Kubernetes liveness/readiness probes
+    # The admin port should NOT be exposed via Route/Ingress
     admin:
       address:
         socket_address:
