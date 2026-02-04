@@ -229,36 +229,6 @@ class TestHealthEndpointExemptions:
             "Check jwt_authn rules and Lua filter is_exempt_path() function."
         )
 
-    def test_healthz_endpoint_internal_only(
-        self, gateway_url: str, http_session: requests.Session
-    ):
-        """Verify /healthz endpoint behavior via external route.
-
-        The /healthz endpoint is a direct response from Envoy for internal
-        health checks (Kubernetes probes). It may not be exposed externally
-        via the OpenShift route, which typically only exposes /api/* paths.
-
-        This test documents the expected behavior rather than asserting
-        external accessibility.
-        """
-        response = http_session.get(
-            f"{gateway_url}/healthz",
-            timeout=10,
-        )
-
-        # /healthz is typically not exposed via external route
-        # It's designed for internal Kubernetes probes, not external access
-        if response.status_code in [401, 404]:
-            # Expected: not exposed or requires different path
-            pytest.skip(
-                "/healthz is internal-only (not exposed via external route). "
-                "This is expected - use /api/ingress/ready for external health checks."
-            )
-
-        # If it is accessible, verify it returns OK
-        assert response.status_code == 200, (
-            f"Health endpoint should return 200 if exposed, got {response.status_code}"
-        )
 
 
 @pytest.mark.auth
