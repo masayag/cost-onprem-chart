@@ -1,8 +1,24 @@
 {{- $keycloakUrl := .Values.jwtAuth.keycloak.url | default (include "cost-onprem.keycloak.url" .) }}
 {{- $issuerUrl := include "cost-onprem.keycloak.issuerUrl" . }}
 {{- $jwksUrl := include "cost-onprem.keycloak.jwksUrl" . }}
-{{- /* Extract hostname from Keycloak URL: strip protocol, port, and path */ -}}
-{{- $keycloakHost := $keycloakUrl | replace "https://" "" | replace "http://" "" | regexReplaceAll ":.*" "" | regexReplaceAll "/.*" "" }}
+{{- /* Extract hostname and port from Keycloak URL */ -}}
+{{- /* Step 1: Remove protocol prefix */ -}}
+{{- $urlWithoutProtocol := $keycloakUrl | trimPrefix "https://" | trimPrefix "http://" }}
+{{- /* Step 2: Get host:port by splitting on first slash and taking first part */ -}}
+{{- $keycloakHostWithPort := (splitList "/" $urlWithoutProtocol) | first | default "" }}
+{{- /* Step 3: Extract hostname by splitting on colon */ -}}
+{{- $hostParts := splitList ":" $keycloakHostWithPort }}
+{{- $keycloakHost := $hostParts | first | default "" }}
+{{- /* Step 4: Extract port - use second element if exists, otherwise default based on protocol */ -}}
+{{- $defaultPort := ternary "443" "80" (hasPrefix "https://" $keycloakUrl) }}
+{{- $keycloakPort := .Values.jwtAuth.keycloak.port }}
+{{- if not $keycloakPort }}
+  {{- if gt (len $hostParts) 1 }}
+    {{- $keycloakPort = index $hostParts 1 }}
+  {{- else }}
+    {{- $keycloakPort = $defaultPort }}
+  {{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -97,6 +113,18 @@ data:
                 virtual_hosts:
                 - name: backend
                   domains: ["*"]
+                  # CORS configuration for browser clients
+                  typed_per_filter_config:
+                    envoy.filters.http.cors:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                      allow_origin_string_match:
+                      - safe_regex:
+                          regex: ".*"
+                      allow_methods: "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD"
+                      allow_headers: "Authorization, Content-Type, X-Requested-With, Accept, Origin, X-Rh-Identity"
+                      expose_headers: "X-Request-Id, X-Local-Rate-Limit"
+                      max_age: "86400"
+                      allow_credentials: true
                   routes:
                   # =========================================================================
                   # ROUTING PRIORITY ORDER (Envoy uses first-match)
@@ -160,13 +188,14 @@ data:
 
                   # 3. Cost Management API - Write operations (POST, PUT, DELETE, PATCH) route to writes service
                   #    This also handles Sources API requests at /api/cost-management/v1/sources/
+                  #    NOTE: No 5xx retry for writes to prevent duplicate resource creation
                   - match:
                       prefix: "/api/cost-management/"
                     route:
                       cluster: koku-api-writes-backend
                       timeout: 60s
                       retry_policy:
-                        retry_on: 5xx,reset,connect-failure,refused-stream
+                        retry_on: reset,connect-failure,refused-stream
                         num_retries: 2
                         per_try_timeout: 30s
 
@@ -183,13 +212,14 @@ data:
                         per_try_timeout: 5s
 
                   # 5. Ingress - General file upload and API endpoints
+                  #    NOTE: No 5xx retry for uploads to prevent duplicate file processing
                   - match:
                       prefix: "/api/ingress/"
                     route:
                       cluster: ingress-backend
                       timeout: 30s
                       retry_policy:
-                        retry_on: 5xx,reset,connect-failure,refused-stream
+                        retry_on: reset,connect-failure,refused-stream
                         num_retries: 2
                         per_try_timeout: 10s
 
@@ -215,13 +245,20 @@ data:
                       forward: true
                       payload_in_metadata: keycloak
                   rules:
-                  # Exempt health endpoints from JWT authentication
+                  # Exempt health endpoints and CORS preflight from JWT authentication
                   - match:
                       path: "/healthz"
                     # No requires = bypass authentication
                   - match:
                       path: "/api/ingress/ready"
                     # No requires = bypass authentication for ingress health check
+                  - match:
+                      prefix: "/"
+                      headers:
+                      - name: ":method"
+                        string_match:
+                          exact: "OPTIONS"
+                    # No requires = bypass authentication for CORS preflight
                   - match:
                       prefix: "/"
                     requires:
@@ -466,6 +503,11 @@ data:
                         end
                       end
 
+              # CORS filter for cross-origin requests (browser clients)
+              - name: envoy.filters.http.cors
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+
               # Compression filter for response optimization
               - name: envoy.filters.http.compressor
                 typed_config:
@@ -508,6 +550,13 @@ data:
                   socket_address:
                     address: {{ include "cost-onprem.fullname" . }}-ros-api.{{ .Release.Namespace }}.svc.cluster.local
                     port_value: {{ .Values.ros.api.port }}
+        health_checks:
+        - timeout: 5s
+          interval: 10s
+          healthy_threshold: 2
+          unhealthy_threshold: 3
+          http_health_check:
+            path: "/healthz"
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
@@ -530,6 +579,13 @@ data:
                   socket_address:
                     address: {{ include "cost-onprem.koku.api.reads.name" . }}.{{ .Release.Namespace }}.svc.cluster.local
                     port_value: {{ include "cost-onprem.koku.api.port" . }}
+        health_checks:
+        - timeout: 5s
+          interval: 10s
+          healthy_threshold: 2
+          unhealthy_threshold: 3
+          http_health_check:
+            path: "/api/cost-management/v1/status/"
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
@@ -552,6 +608,13 @@ data:
                   socket_address:
                     address: {{ include "cost-onprem.koku.api.writes.name" . }}.{{ .Release.Namespace }}.svc.cluster.local
                     port_value: {{ include "cost-onprem.koku.api.port" . }}
+        health_checks:
+        - timeout: 5s
+          interval: 10s
+          healthy_threshold: 2
+          unhealthy_threshold: 3
+          http_health_check:
+            path: "/api/cost-management/v1/status/"
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
@@ -574,6 +637,13 @@ data:
                   socket_address:
                     address: {{ include "cost-onprem.fullname" . }}-ingress.{{ .Release.Namespace }}.svc.cluster.local
                     port_value: {{ .Values.ingress.server.port }}
+        health_checks:
+        - timeout: 5s
+          interval: 10s
+          healthy_threshold: 2
+          unhealthy_threshold: 3
+          http_health_check:
+            path: "/"
         circuit_breakers:
           thresholds:
           - priority: DEFAULT
@@ -601,7 +671,7 @@ data:
                 address:
                   socket_address:
                     address: {{ $keycloakHost }}
-                    port_value: {{ .Values.jwtAuth.keycloak.port | default 443 }}
+                    port_value: {{ $keycloakPort }}
         transport_socket:
           name: envoy.transport_sockets.tls
           typed_config:
