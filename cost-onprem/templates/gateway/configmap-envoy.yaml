@@ -377,9 +377,31 @@ data:
                         )
                       end
 
+                      -- Paths that are exempted from JWT authentication
+                      -- These must match the paths in jwt_authn rules that have no "requires"
+                      local function is_exempt_path(path)
+                        local exempt_paths = {
+                          "/healthz",
+                          "/api/ingress/ready"
+                        }
+                        for _, exempt in ipairs(exempt_paths) do
+                          if path == exempt then
+                            return true
+                          end
+                        end
+                        return false
+                      end
+
                       function envoy_on_request(request_handle)
                         -- Wrap entire function in error handler to prevent crashes
                         local success, err = pcall(function()
+                          -- Check if this is an exempt path (health checks, etc.)
+                          local path = request_handle:headers():get(":path")
+                          if path and is_exempt_path(path) then
+                            -- Allow request through without JWT processing
+                            return
+                          end
+
                           -- Get JWT payload from dynamic metadata (set by jwt_authn filter)
                           local metadata = request_handle:streamInfo():dynamicMetadata()
                           local jwt_metadata = metadata:get("envoy.filters.http.jwt_authn")
