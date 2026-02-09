@@ -13,10 +13,12 @@ These tests verify:
 
 ## Test Files
 
-| File | Description |
-|------|-------------|
-| `test_reports.py` | Cost report endpoints (costs, compute, memory, volumes) |
-| `test_ingress.py` | Data upload validation via ingress endpoint |
+| File | Tests | Description |
+|------|-------|-------------|
+| `test_reports.py` | 7 | Cost report endpoints (costs, compute, memory, volumes) |
+| `test_ingress.py` | 3 | Data upload validation via ingress endpoint |
+| `test_cost_models.py` | 6 | Cost model CRUD and rate configuration |
+| `test_tagging.py` | 7 | Tag-based filtering and grouping |
 
 **Note**: ROS/recommendations tests are in `suites/ros/test_recommendations.py`.
 

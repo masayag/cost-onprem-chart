@@ -22,12 +22,15 @@ tests/
 ├── requirements.txt         # Python dependencies
 ├── reports/                 # JUnit XML reports (generated)
 └── suites/                  # Test suites organized by subject
-    ├── helm/                # Helm chart validation
+    ├── api/                 # External API tests via gateway → [README](suites/api/README.md)
     ├── auth/                # JWT authentication
-    ├── infrastructure/      # Infrastructure health (DB, S3, Kafka) → [README](suites/infrastructure/README.md)
     ├── cost_management/     # Koku pipeline validation → [README](suites/cost_management/README.md)
+    ├── e2e/                 # Complete end-to-end pipeline → [README](suites/e2e/README.md)
+    ├── helm/                # Helm chart validation
+    ├── infrastructure/      # Infrastructure health (DB, S3, Kafka) → [README](suites/infrastructure/README.md)
+    ├── interpod/            # Pod-to-pod cluster tests → [README](suites/interpod/README.md)
     ├── ros/                 # ROS/Kruize component health
-    └── e2e/                 # Complete end-to-end pipeline → [README](suites/e2e/README.md)
+    └── ui/                  # UI tests (Playwright) → [README](suites/ui/README.md)
 ```
 
 ## Suite Documentation
@@ -36,20 +39,26 @@ Each suite has its own README with detailed test descriptions:
 
 | Suite | README | Highlights |
 |-------|--------|------------|
-| **infrastructure** | [suites/infrastructure/README.md](suites/infrastructure/README.md) | Kafka validation, S3/Storage preflight |
+| **api** | [suites/api/README.md](suites/api/README.md) | External API tests via gateway (reports, ingress, cost models, tagging) |
 | **cost_management** | [suites/cost_management/README.md](suites/cost_management/README.md) | Cost calculation validation, Processing state |
 | **e2e** | [suites/e2e/README.md](suites/e2e/README.md) | YAML-driven scenario tests |
+| **infrastructure** | [suites/infrastructure/README.md](suites/infrastructure/README.md) | Kafka validation, S3/Storage preflight |
+| **interpod** | [suites/interpod/README.md](suites/interpod/README.md) | Pod-to-pod cluster tests via test-runner pod |
+| **ui** | [suites/ui/README.md](suites/ui/README.md) | Playwright UI tests (navigation, login, optimizations) |
 
 ### Suite Responsibilities
 
 | Suite | Purpose | What It Tests |
 |-------|---------|---------------|
-| **helm** | Chart validation | Lint, template rendering, deployment health |
+| **api** | External API | Reports, ingress, cost models, tagging via gateway |
 | **auth** | Authentication | Keycloak, JWT ingress/backend auth |
-| **infrastructure** | Infrastructure health | Database, S3, Kafka connectivity |
 | **cost_management** | Koku health | Sources API, Listener, MASU health |
-| **ros** | ROS health | Kruize, ROS Processor, API health |
 | **e2e** | Complete pipeline | **Full flow: Data → Ingress → Koku → ROS** |
+| **helm** | Chart validation | Lint, template rendering, deployment health |
+| **infrastructure** | Infrastructure health | Database, S3, Kafka connectivity |
+| **interpod** | Pod-to-pod tests | Internal service communication, X-Rh-Identity |
+| **ros** | ROS health | Kruize, ROS Processor, API health |
+| **ui** | UI validation | Navigation, login, optimizations (Playwright) |
 
 ### Test Type Markers
 
@@ -207,12 +216,15 @@ pytest -x
 ### Suite Markers
 | Marker | Description |
 |--------|-------------|
-| `helm` | Helm chart validation tests |
+| `api` | External API tests via gateway |
 | `auth` | JWT authentication tests |
-| `infrastructure` | Infrastructure health tests |
 | `cost_management` | Koku component tests |
-| `ros` | ROS/Kruize tests |
 | `e2e` | End-to-end pipeline tests |
+| `helm` | Helm chart validation tests |
+| `infrastructure` | Infrastructure health tests |
+| `interpod` | Pod-to-pod cluster tests |
+| `ros` | ROS/Kruize tests |
+| `ui` | UI tests (Playwright) |
 
 ### Type Markers
 | Marker | Description |
