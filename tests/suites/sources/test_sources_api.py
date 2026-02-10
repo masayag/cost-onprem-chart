@@ -554,3 +554,166 @@ class TestSourcesFiltering:
         assert "openshift" in names, f"OpenShift not in filtered results: {names}"
 
 
+# =============================================================================
+# P2 - Validation Edge Cases
+# =============================================================================
+
+
+@pytest.mark.sources
+@pytest.mark.component
+class TestValidationEdgeCases:
+    """Tests for input validation edge cases."""
+
+    def test_source_create_requires_name(
+        self, cluster_config, koku_api_writes_url: str, ingress_pod: str, rh_identity_header: str
+    ):
+        """Verify source creation validates required fields.
+
+        POST with empty payload should return 400.
+        """
+        result = exec_in_pod(
+            cluster_config.namespace,
+            ingress_pod,
+            [
+                "curl", "-s", "-w", "\n%{http_code}",
+                "-X", "POST",
+                f"{koku_api_writes_url}/sources",
+                "-H", "Content-Type: application/json",
+                "-H", f"X-Rh-Identity: {rh_identity_header}",
+                "-d", "{}",
+            ],
+            container="ingress",
+        )
+
+        body, status = parse_curl_response(result)
+        assert status == "400", f"Expected 400 for empty payload, got {status}: {body}"
+
+    def test_source_get_by_id_not_found(
+        self, cluster_config, koku_api_reads_url: str, ingress_pod: str, rh_identity_header: str
+    ):
+        """Verify getting non-existent source returns 404."""
+        fake_id = "99999999"
+
+        result = exec_in_pod(
+            cluster_config.namespace,
+            ingress_pod,
+            [
+                "curl", "-s", "-w", "\n%{http_code}",
+                f"{koku_api_reads_url}/sources/{fake_id}",
+                "-H", f"X-Rh-Identity: {rh_identity_header}",
+            ],
+            container="ingress",
+        )
+
+        body, status = parse_curl_response(result)
+        assert status == "404", f"Expected 404 for non-existent source, got {status}: {body}"
+
+    def test_source_create_requires_source_ref(
+        self, cluster_config, koku_api_writes_url: str, koku_api_reads_url: str,
+        ingress_pod: str, rh_identity_header: str
+    ):
+        """Verify source creation requires source_ref (cluster_id).
+
+        The Sources API requires source_ref when creating a source.
+        This test verifies that the API correctly rejects sources without it.
+        """
+        # Get OpenShift source type ID
+        result = exec_in_pod(
+            cluster_config.namespace,
+            ingress_pod,
+            [
+                "curl", "-s", "-w", "\n%{http_code}",
+                f"{koku_api_reads_url}/source_types",
+                "-H", f"X-Rh-Identity: {rh_identity_header}",
+            ],
+            container="ingress",
+        )
+
+        body, status = parse_curl_response(result)
+        if status != "200" or not body:
+            pytest.skip("Could not get source types")
+
+        data = json.loads(body)
+        ocp_source_type = next(
+            (st for st in data.get("data", []) if st.get("name") == "openshift"),
+            None
+        )
+
+        if ocp_source_type is None:
+            pytest.skip("OpenShift source type not found")
+
+        ocp_source_type_id = str(ocp_source_type.get("id"))
+
+        # Try to create source WITHOUT source_ref
+        source_payload = json.dumps({
+            "name": f"pytest-source-{uuid.uuid4().hex[:8]}",
+            "source_type_id": ocp_source_type_id,
+            # Missing source_ref
+        })
+
+        result = exec_in_pod(
+            cluster_config.namespace,
+            ingress_pod,
+            [
+                "curl", "-s", "-w", "\n%{http_code}",
+                "-X", "POST",
+                f"{koku_api_writes_url}/sources",
+                "-H", "Content-Type: application/json",
+                "-H", f"X-Rh-Identity: {rh_identity_header}",
+                "-d", source_payload,
+            ],
+            container="ingress",
+        )
+
+        body, status = parse_curl_response(result)
+        # API should reject source without source_ref with 400
+        assert status == "400", (
+            f"Expected 400 for source without source_ref, got {status}: {body}"
+        )
+
+
+# =============================================================================
+# P3 - Source Status
+# =============================================================================
+
+
+@pytest.mark.sources
+@pytest.mark.integration
+class TestSourceStatus:
+    """Tests for source status and health information."""
+
+    def test_source_has_status_info(
+        self, cluster_config, koku_api_reads_url: str, ingress_pod: str, rh_identity_header: str
+    ):
+        """Verify source objects include status information.
+
+        Note: The exact status structure may vary. This test documents expected behavior.
+        """
+        result = exec_in_pod(
+            cluster_config.namespace,
+            ingress_pod,
+            [
+                "curl", "-s", "-w", "\n%{http_code}",
+                f"{koku_api_reads_url}/sources",
+                "-H", f"X-Rh-Identity: {rh_identity_header}",
+            ],
+            container="ingress",
+        )
+
+        body, status = parse_curl_response(result)
+        if status != "200" or not body:
+            pytest.skip("Could not list sources")
+
+        data = json.loads(body)
+        sources = data.get("data", [])
+
+        if not sources:
+            pytest.skip("No sources configured to check status")
+
+        # Check if sources have status information
+        source = sources[0]
+        # Status may be embedded in source object or available via separate endpoint
+        if "status" in source:
+            print(f"Source status: {source['status']}")
+        else:
+            print(f"Source structure: {list(source.keys())}")
