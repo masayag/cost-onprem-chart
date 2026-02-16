@@ -910,3 +910,4 @@ probes:
 monitoring:
   enabled: true  # Enable monitoring components (ServiceMonitor, etc.)
   scrapeInterval: 30s  # Prometheus scrape interval for metrics collection
+
