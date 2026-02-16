@@ -8,7 +8,7 @@ the external API contract.
 import pytest
 import requests
 
-from conftest import ClusterConfig, JWTToken
+from conftest import ClusterConfig, JWTToken, obtain_jwt_token
 from utils import run_oc_command
 
 
@@ -28,15 +28,12 @@ def ocp_source_type_id(
     Skips:
         If the source types endpoint is not accessible or OCP type not found
     """
-    from conftest import obtain_jwt_token
-    
     # Get a fresh token for this session-scoped fixture
     token = obtain_jwt_token(keycloak_config)
     
     session = requests.Session()
     session.headers.update({
         "Authorization": f"Bearer {token.access_token}",
-        "Content-Type": "application/json",
     })
     session.verify = False
     
@@ -54,7 +51,7 @@ def ocp_source_type_id(
             if source_type.get("name") == "OCP":
                 return source_type["id"]
         
-        pytest.skip("OCP source type not found in source-types response")
+        pytest.fail("OCP source type not found in source-types response")
         
     except requests.RequestException as e:
         pytest.skip(f"Failed to connect to gateway: {e}")

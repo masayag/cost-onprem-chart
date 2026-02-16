@@ -24,6 +24,20 @@ import pytest
 import requests
 
 
+# Sample cost model payload for testing
+SAMPLE_COST_MODEL_PAYLOAD = {
+    "name": "pytest-test-cost-model",
+    "description": "Test cost model created by pytest",
+    "source_type": "OCP",
+    "rates": [
+        {
+            "metric": {"name": "cpu_core_usage_per_hour"},
+            "tiered_rates": [{"value": 0.01, "unit": "USD"}],
+        }
+    ],
+}
+
+
 @pytest.mark.api
 @pytest.mark.component
 class TestCostModelsAPI:
@@ -118,26 +132,10 @@ class TestCostModelCRUD:
     sources list until sources are assigned.
     """
 
-    @pytest.fixture
-    def sample_cost_model_payload(self):
-        """Sample cost model payload for testing."""
-        return {
-            "name": "pytest-test-cost-model",
-            "description": "Test cost model created by pytest",
-            "source_type": "OCP",
-            "rates": [
-                {
-                    "metric": {"name": "cpu_core_usage_per_hour"},
-                    "tiered_rates": [{"value": 0.01, "unit": "USD"}],
-                }
-            ],
-        }
-
     def test_cost_model_create(
         self,
         authenticated_session: requests.Session,
         gateway_url: str,
-        sample_cost_model_payload: dict,
     ):
         """Verify cost model can be created.
         
@@ -148,7 +146,7 @@ class TestCostModelCRUD:
         # Note: Don't follow redirects to avoid POST->GET conversion
         response = authenticated_session.post(
             f"{gateway_url}/cost-management/v1/cost-models/",
-            json=sample_cost_model_payload,
+            json=SAMPLE_COST_MODEL_PAYLOAD,
             timeout=30,
             allow_redirects=False,
         )

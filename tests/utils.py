@@ -5,9 +5,11 @@ These are helper functions that can be imported by test modules across all suite
 """
 
 import base64
+import http.client
 import io
 import json
 import re
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -21,6 +23,20 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.structures import CaseInsensitiveDict
 from urllib3.response import HTTPResponse
+
+
+class _FakeSocket:
+    """Minimal socket-like object for http.client.HTTPResponse.
+    
+    Used by PodAdapter to parse raw HTTP response text from curl output.
+    http.client.HTTPResponse expects a socket with a makefile() method.
+    """
+    
+    def __init__(self, data: bytes) -> None:
+        self._file = io.BytesIO(data)
+    
+    def makefile(self, mode: str) -> io.BytesIO:
+        return self._file
 
 
 # =============================================================================
@@ -278,88 +294,69 @@ class PodAdapter(HTTPAdapter):
         result: subprocess.CompletedProcess,
         request: requests.PreparedRequest,
     ) -> requests.Response:
-        """Parse curl -i output into a requests.Response object."""
-        response = requests.Response()
-        response.request = request
+        """Parse curl -i output into a requests.Response object.
         
+        Uses http.client to parse the raw HTTP response and HTTPAdapter.build_response()
+        to construct the Response properly.
+        """
         # Handle curl errors
         if result.returncode != 0:
-            # Create a fake response for connection errors
-            response.status_code = 0
-            response._content = result.stderr.encode() if result.stderr else b"Connection failed"
-            response.reason = "Connection Error"
-            response.headers = CaseInsensitiveDict()
-            return response
+            raise requests.exceptions.ConnectionError(
+                f"curl failed (exit {result.returncode}): {result.stderr or 'Connection failed'}"
+            )
         
         raw_output = result.stdout
+        if not raw_output:
+            raise requests.exceptions.ConnectionError("curl returned empty response")
         
-        # curl -i output format:
-        # HTTP/1.1 200 OK
-        # Header: Value
-        # Header: Value
-        # 
-        # Body content
+        # Normalize line endings to \r\n for HTTP parsing
+        # HTTP spec requires \r\n, but curl output may have \n depending on server/platform
+        # Use regex to normalize only \n that aren't already part of \r\n
+        raw_output = re.sub(r'(?<!\r)\n', '\r\n', raw_output)
         
-        # Split headers and body (separated by \r\n\r\n or \n\n)
-        header_body_split = re.split(r'\r?\n\r?\n', raw_output, maxsplit=1)
-        
-        if len(header_body_split) < 1:
-            response.status_code = 0
-            response._content = b"Failed to parse response"
-            response.reason = "Parse Error"
-            response.headers = CaseInsensitiveDict()
-            return response
-        
-        header_section = header_body_split[0]
-        body = header_body_split[1] if len(header_body_split) > 1 else ""
-        
-        # Handle HTTP/1.1 100 Continue followed by actual response
-        while header_section.startswith("HTTP/") and "100" in header_section.split("\n")[0]:
-            # Skip the 100 Continue and find the real response
-            remaining = body
-            header_body_split = re.split(r'\r?\n\r?\n', remaining, maxsplit=1)
-            if len(header_body_split) >= 1:
-                header_section = header_body_split[0]
-                body = header_body_split[1] if len(header_body_split) > 1 else ""
+        # Handle HTTP/1.1 100 Continue - skip to the real response
+        while raw_output.startswith("HTTP/") and " 100 " in raw_output.split("\r\n")[0]:
+            # Find the end of the 100 Continue response and skip it
+            parts = raw_output.split("\r\n\r\n", 1)
+            if len(parts) > 1:
+                raw_output = parts[1]
             else:
                 break
         
-        # Parse status line
-        header_lines = header_section.split("\n")
-        status_line = header_lines[0].strip()
-        
-        # Parse "HTTP/1.1 200 OK" or "HTTP/2 200"
-        status_match = re.match(r'HTTP/[\d.]+\s+(\d+)(?:\s+(.*))?', status_line)
-        if status_match:
-            response.status_code = int(status_match.group(1))
-            response.reason = status_match.group(2) or ""
-        else:
-            response.status_code = 0
-            response.reason = "Unknown"
-        
-        # Parse headers
-        headers = CaseInsensitiveDict()
-        for line in header_lines[1:]:
-            line = line.strip()
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip()] = value.strip()
-        
-        response.headers = headers
-        
-        # Set body content
-        response._content = body.encode("utf-8")
-        
-        # Set encoding from Content-Type header
-        content_type = headers.get("Content-Type", "")
-        if "charset=" in content_type:
-            charset_match = re.search(r'charset=([^\s;]+)', content_type)
-            if charset_match:
-                response.encoding = charset_match.group(1)
-        else:
-            response.encoding = "utf-8"
-        
-        return response
+        try:
+            # Parse using http.client.HTTPResponse with a fake socket
+            raw_bytes = raw_output.encode("utf-8")
+            sock = _FakeSocket(raw_bytes)
+            http_response = http.client.HTTPResponse(sock)
+            http_response.begin()
+            
+            # Read the body
+            body = http_response.read()
+            
+            # Build urllib3 HTTPResponse for build_response()
+            # Setting preload_content=True ensures body is read into response
+            urllib3_response = HTTPResponse(
+                body=io.BytesIO(body),
+                headers=dict(http_response.getheaders()),
+                status=http_response.status,
+                reason=http_response.reason,
+                preload_content=True,
+            )
+            
+            # Use HTTPAdapter's build_response to construct Response properly
+            response = self.build_response(request, urllib3_response)
+            
+            # build_response with preload_content=True should set _content,
+            # but ensure it's set for consistency
+            if not response._content_consumed:
+                response._content = body
+            
+            return response
+            
+        except Exception as e:
+            raise requests.exceptions.ConnectionError(
+                f"Failed to parse HTTP response: {e}"
+            ) from e
 
 
 def create_pod_session(
