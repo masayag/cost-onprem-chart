@@ -34,14 +34,41 @@ jobs:
         helm template cost-onprem . > /tmp/rendered.yaml
         echo "✓ helm template with ZERO --set flags succeeded"
 
-        # Verify rendered output contains expected image references (oc-mirror discovers these)
-        IMAGE_COUNT=$(grep -c 'image:' /tmp/rendered.yaml || true)
-        echo "Found ${IMAGE_COUNT} image references in rendered output"
-        if [ "${IMAGE_COUNT}" -lt 10 ]; then
-          echo "ERROR: Expected at least 10 image references, found ${IMAGE_COUNT}"
-          exit 1
-        fi
-        echo "✓ Image reference count check passed (${IMAGE_COUNT} >= 10)"
+    - name: Verify oc-mirror compatibility
+      run: |
+        set -euo pipefail
+
+        echo "=== Starting local registry ==="
+        docker run -d --name registry -p 5050:5000 registry:2
+        sleep 2
+
+        echo "=== Downloading oc-mirror ==="
+        curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/oc-mirror.tar.gz | tar -xzf -
+        chmod +x oc-mirror
+
+        echo "=== Creating ImageSetConfiguration ==="
+        cat > /tmp/imageset-config.yaml << 'EOF'
+        apiVersion: mirror.openshift.io/v2alpha1
+        kind: ImageSetConfiguration
+        mirror:
+          helm:
+            local:
+              - name: cost-onprem
+                path: ./cost-onprem
+        EOF
+        # Remove leading whitespace from heredoc (bash limitation)
+        sed -i 's/^        //' /tmp/imageset-config.yaml
+
+        echo "=== Running oc-mirror --dry-run --v2 ==="
+        ./oc-mirror --config /tmp/imageset-config.yaml docker://localhost:5050 --dry-run --v2
+
+        echo "✓ oc-mirror can discover and plan the mirror from the Helm chart"
+
+    - name: Cleanup registry
+      if: always()
+      run: |
+        docker stop registry || true
+        docker rm registry || true
 
     - name: Validate Helm templates (with overrides)
       run: |
