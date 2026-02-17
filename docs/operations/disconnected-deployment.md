@@ -28,19 +28,6 @@ mirror:
         charts:
           - name: cost-onprem
             version: "0.2.9"
-  additionalImages:
-    # Custom images (quay.io/insights-onprem)
-    - name: quay.io/insights-onprem/ros-ocp-backend:latest
-    - name: quay.io/insights-onprem/koku:sources
-    - name: quay.io/insights-onprem/insights-ingress-go:latest
-    - name: quay.io/insights-onprem/koku-ui-onprem:latest
-    - name: quay.io/insights-onprem/postgresql:16
-    # Third-party images
-    - name: registry.access.redhat.com/ubi9/ubi-minimal:latest
-    - name: quay.io/redhat-services-prod/kruize-autotune-tenant/autotune:d0b4337
-    - name: registry.redhat.io/rhel10/valkey-8:latest
-    - name: registry.redhat.io/openshift-service-mesh/proxyv2-rhel9:2.6
-    - name: registry.redhat.io/rhceph/oauth2-proxy-rhel9:v7.6.0
 ```
 
 ## Step 2: Mirror to Disk
