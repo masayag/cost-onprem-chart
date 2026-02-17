@@ -126,6 +126,7 @@ For administrators who prefer full control over the deployment or cannot use the
 | Source | Use Case | Installation |
 |--------|----------|--------------|
 | Helm Repository | Production (recommended) | `helm repo add cost-onprem https://insights-onprem.github.io/cost-onprem-chart` |
+| OCI Registry | Air-gapped, GitOps, oc-mirror | `helm pull oci://ghcr.io/insights-onprem/cost-onprem-chart/cost-onprem` |
 | Local Source | Development, testing, modifications | Clone repo and use `./cost-onprem` directory |
 
 **Helm Repository (recommended):**
@@ -150,6 +151,34 @@ helm install cost-onprem cost-onprem/cost-onprem \
 ```bash
 helm search repo cost-onprem
 ```
+
+**OCI Registry (air-gapped/GitOps):**
+
+The chart is also published as an OCI artifact to GitHub Container Registry. This is useful for:
+- Air-gapped environments using `oc-mirror`
+- GitOps workflows (ArgoCD, Flux) that prefer OCI references
+- Environments where traditional Helm repositories are blocked
+
+```bash
+# Install latest version from OCI registry
+helm install cost-onprem oci://ghcr.io/insights-onprem/cost-onprem-chart/cost-onprem \
+  --namespace cost-onprem \
+  --create-namespace
+
+# Install a specific version
+helm install cost-onprem oci://ghcr.io/insights-onprem/cost-onprem-chart/cost-onprem \
+  --namespace cost-onprem \
+  --create-namespace \
+  --version 0.2.9
+
+# Pull chart locally (for inspection or mirroring)
+helm pull oci://ghcr.io/insights-onprem/cost-onprem-chart/cost-onprem --version 0.2.9
+
+# Show available versions
+helm show all oci://ghcr.io/insights-onprem/cost-onprem-chart/cost-onprem
+```
+
+> **Note:** OCI-based installation does not require `helm repo add`. The chart is fetched directly from the container registry.
 
 **Local Source (for development):**
 ```bash
