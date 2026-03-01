@@ -767,22 +767,73 @@ When `valkey.deploy: false`:
 
 ---
 
-### External Kafka
+### Kafka Infrastructure Requirements
 
-Use an existing Kafka cluster instead of the AMQ Streams-managed Kafka deployed by the install script.
+Cost Management On-Premise uses Apache Kafka for its data pipeline. Kafka can be deployed automatically by the bundled `deploy-kafka.sh` script (via AMQ Streams) or managed externally by the cluster administrator.
+
+#### What the bundled deployment provides
+
+When you run `./scripts/deploy-kafka.sh`, the script installs AMQ Streams (Streams for Apache Kafka) 3.1 via OLM and creates a KRaft-based Kafka cluster with the following characteristics:
+
+| Property | Development (`dev`) | Production (`ocp`) |
+|----------|--------------------|--------------------|
+| Kafka version | 4.1.0 | 4.1.0 |
+| Cluster mode | KRaft (no ZooKeeper) | KRaft (no ZooKeeper) |
+| Broker nodes | 1 | 3 |
+| Controller nodes | 1 | 3 |
+| Broker storage | 10 Gi persistent (JBOD) | 100 Gi persistent (JBOD) |
+| Controller storage | 5 Gi persistent (JBOD) | 20 Gi persistent (JBOD) |
+| Listeners | PLAINTEXT (9092) | PLAINTEXT (9092) + TLS (9093) |
+| Replication factor | 1 | 3 |
+| Min in-sync replicas | 1 | 2 |
+| Log retention | 7 days | 7 days |
+
+#### Required Kafka topics
+
+The following topics must exist before the application starts processing data. The bundled script creates them automatically. If you manage Kafka externally, create them manually or enable `auto.create.topics.enable`.
+
+| Topic | Partitions | Purpose | Producers | Consumers |
+|-------|------------|---------|-----------|-----------|
+| `platform.upload.announce` | 3 | Upload announcements for cost reports | Ingress | Koku Listener |
+| `platform.payload-status` | 3 | Payload processing status tracking | Ingress | Koku Listener |
+| `hccm.ros.events` | 3 | Resource optimization events | Koku (MASU) | ROS Processor |
+| `platform.sources.event-stream` | 3 | Source configuration events | Sources API | Koku Listener |
+| `rosocp.kruize.recommendations` | 3 | Kruize optimization recommendations | Kruize | ROS Recommendation Poller |
+
+**Recommended topic settings:**
+- **Replication factor**: Match your broker count (3 for production)
+- **Retention**: At least 7 days (`retention.ms: 604800000`)
+- **Segment rotation**: 1 day (`segment.ms: 86400000`)
+
+#### Kafka connection settings
+
+The Helm chart does **not** deploy Kafka — it only configures applications to connect to it. Connection settings are in `values.yaml`:
+
+```yaml
+kafka:
+  bootstrapServers: "cost-onprem-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+  securityProtocol: "PLAINTEXT"
+```
+
+The `install-helm-chart.sh` script auto-detects the bootstrap address from the deployed Kafka cluster. To override (e.g., for an external cluster):
+
+```bash
+KAFKA_BOOTSTRAP_SERVERS="my-kafka-broker1:9092" ./scripts/install-helm-chart.sh
+```
+
+Or set it in your values file directly.
+
+#### External Kafka
+
+Use an existing Kafka cluster instead of the bundled AMQ Streams deployment.
 
 > **Known Limitation:** Only **PLAINTEXT** Kafka connections are currently supported. Both Koku and ROS backends do not read SASL/TLS configuration from environment variables in on-prem (non-Clowder) mode. Upstream application changes are required before chart-level SASL/TLS support can be added.
 
 **Prerequisites:**
 
-1. A Kafka 3.x+ cluster accessible from the OpenShift cluster with **PLAINTEXT** listeners
-2. The following topics must exist (or auto-creation must be enabled):
-
-| Topic | Purpose |
-|-------|---------|
-| `platform.upload.announce` | Upload announcements (Ingress -> Koku Listener) |
-| `hccm.ros.events` | ROS events (ROS Processor) |
-| `rosocp.kruize.recommendations` | Kruize recommendations (ROS Recommendation Poller) |
+1. Apache Kafka 3.x or later accessible from the OpenShift cluster with a **PLAINTEXT** listener
+2. All five topics listed above must exist (or `auto.create.topics.enable` must be set to `true`)
+3. Bootstrap servers reachable from the `cost-onprem` namespace over the network
 
 **Configuration:**
 
@@ -793,13 +844,24 @@ kafka:
   securityProtocol: "PLAINTEXT"
 ```
 
-**Install script behavior:** When running `install-helm-chart.sh`, set `KAFKA_BOOTSTRAP_SERVERS` to skip AMQ Streams verification:
+**Install script behavior:** Setting `KAFKA_BOOTSTRAP_SERVERS` tells the install script to skip AMQ Streams operator verification:
 
 ```bash
 KAFKA_BOOTSTRAP_SERVERS="my-kafka-broker1:9092" ./scripts/install-helm-chart.sh --namespace cost-onprem
 ```
 
-**Consumers:** Ingress (producer), Koku Listener (consumer), ROS Processor (consumer), ROS Recommendation Poller (consumer), ROS Housekeeper, ROS API.
+**Components that use Kafka:**
+
+| Component | Role | Topics used |
+|-----------|------|-------------|
+| Ingress | Producer | `platform.upload.announce`, `platform.payload-status` |
+| Koku Listener | Consumer | `platform.upload.announce`, `platform.payload-status`, `platform.sources.event-stream` |
+| Koku (MASU) | Producer | `hccm.ros.events` |
+| ROS Processor | Consumer | `hccm.ros.events` |
+| ROS Recommendation Poller | Consumer | `rosocp.kruize.recommendations` |
+| ROS Housekeeper | Consumer | `hccm.ros.events` |
+| ROS API | Consumer | (reads consumer group offsets) |
+| Kruize | Producer | `rosocp.kruize.recommendations` |
 
 ---
 
