@@ -761,27 +761,53 @@ cleanup_deployment() {
     echo_info "Removing AMQ Streams and Kafka resources..."
 
     # Remove Kafka resources in reverse dependency order.
-    # The operator must be running throughout so it can process CR finalizers.
-    # Order: leaf resources -> Kafka CR (wait) -> KafkaNodePools
+    # The operator must stay running throughout so it can process CR finalizers.
+    # Order: leaf resources -> Kafka CR (wait until gone) -> KafkaNodePools -> operator -> CRDs -> namespace
+
+    # Helper: wait for all instances of a CRD kind to disappear from the namespace.
+    # Falls back to stripping finalizers if the timeout expires.
+    wait_for_cr_deletion() {
+        local kind="$1"
+        local ns="$2"
+        local wait_timeout="${3:-120}"
+        local elapsed=0
+
+        while [ $elapsed -lt $wait_timeout ]; do
+            local remaining
+            remaining=$(kubectl get "$kind" -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$remaining" -eq 0 ]; then
+                return 0
+            fi
+            if [ $((elapsed % 30)) -eq 0 ] && [ $elapsed -gt 0 ]; then
+                echo_info "Still waiting for $kind deletion... ($remaining remaining, ${elapsed}s elapsed)"
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+        done
+
+        echo_warning "Timeout waiting for $kind deletion — stripping finalizers on remaining resources"
+        kubectl patch "$kind" --all -n "$ns" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+        kubectl delete "$kind" --all -n "$ns" --timeout 15s 2>/dev/null || true
+    }
 
     # 1. Leaf resources first (topics, users)
     echo_info "Removing Kafka topics and users..."
-    kubectl delete kafkatopic --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
-        kubectl patch kafkatopic --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-    kubectl delete kafkauser --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
-        kubectl patch kafkauser --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    kubectl delete kafkatopic --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
+    kubectl delete kafkauser --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
 
-    # 2. Kafka CR — triggers operator to tear down brokers and controllers via finalizers
+    # 2. Kafka CR — triggers operator to tear down brokers and controllers via finalizers.
+    #    We must wait for it to be fully gone before touching node pools or the operator.
     echo_info "Removing Kafka cluster (waiting for finalizers)..."
-    kubectl delete kafka --all -n "$KAFKA_NAMESPACE" --timeout 120s 2>/dev/null || \
-        kubectl patch kafka --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    kubectl delete kafka --all -n "$KAFKA_NAMESPACE" --timeout 120s 2>/dev/null || true
+    wait_for_cr_deletion kafka "$KAFKA_NAMESPACE" 180
 
-    # 3. KafkaNodePools — safe to remove after the Kafka CR finalizers have completed
+    # 3. KafkaNodePools — safe only after the Kafka CR is fully gone
     echo_info "Removing KafkaNodePool resources..."
-    kubectl delete kafkanodepool --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
-        kubectl patch kafkanodepool --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    kubectl delete kafkanodepool --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
+    wait_for_cr_deletion kafkanodepool "$KAFKA_NAMESPACE" 60
 
-    # Remove OLM resources (Subscription, CSV, OperatorGroup)
+    # 4. Remove OLM resources (Subscription, CSV, OperatorGroup) — operator no longer needed
+    echo_info "Removing AMQ Streams operator..."
     local csv_name
     csv_name=$(kubectl get subscriptions.operators.coreos.com amq-streams -n "$KAFKA_NAMESPACE" -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
 
@@ -800,7 +826,7 @@ cleanup_deployment() {
         helm uninstall strimzi-cluster-operator -n "$namespace" --timeout 2m0s 2>/dev/null || true
     done
 
-    # Remove RBAC resources created by the operator
+    # 5. Remove RBAC resources created by the operator
     kubectl delete clusterrolebinding strimzi-cluster-operator 2>/dev/null || true
     kubectl delete clusterrole strimzi-cluster-operator-global 2>/dev/null || true
     kubectl delete clusterrole strimzi-cluster-operator-leader-election 2>/dev/null || true
@@ -812,7 +838,7 @@ cleanup_deployment() {
     kubectl delete clusterrolebinding strimzi-cluster-operator-kafka-broker-delegation 2>/dev/null || true
     kubectl delete clusterrolebinding strimzi-cluster-operator-kafka-client-delegation 2>/dev/null || true
 
-    # Remove CRDs (with timeout to prevent hanging)
+    # 6. Remove CRDs (with timeout to prevent hanging)
     kubectl delete crd kafkas.kafka.strimzi.io --timeout 30s 2>/dev/null || true
     kubectl delete crd kafkatopics.kafka.strimzi.io --timeout 30s 2>/dev/null || true
     kubectl delete crd kafkausers.kafka.strimzi.io --timeout 30s 2>/dev/null || true
@@ -825,7 +851,16 @@ cleanup_deployment() {
     kubectl delete crd kafkarebalances.kafka.strimzi.io --timeout 30s 2>/dev/null || true
     kubectl delete crd strimzipodsets.core.strimzi.io --timeout 30s 2>/dev/null || true
 
-    # Remove namespace
+    # 7. Guard: only delete the namespace when no Kafka CRs remain inside it
+    local remaining_crs
+    remaining_crs=$(kubectl get kafka,kafkanodepool,kafkatopic,kafkauser -n "$KAFKA_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$remaining_crs" -gt 0 ]; then
+        echo_warning "$remaining_crs Kafka CR(s) still present — skipping namespace deletion to avoid stuck Terminating state"
+        echo_info "Resolve finalizers manually, then run: kubectl delete namespace $KAFKA_NAMESPACE"
+        echo_success "Cleanup completed (namespace preserved)"
+        return 0
+    fi
+
     kubectl delete namespace "$KAFKA_NAMESPACE" --timeout 60s 2>/dev/null || true
 
     echo_info "Waiting for namespace to be fully deleted..."
