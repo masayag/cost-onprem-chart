@@ -760,15 +760,26 @@ cleanup_deployment() {
     echo_header "CLEANING UP DEPLOYMENT"
     echo_info "Removing AMQ Streams and Kafka resources..."
 
-    # Remove Kafka resources (with timeout to prevent hanging)
-    kubectl delete kafka --all -n "$KAFKA_NAMESPACE" --timeout 60s 2>/dev/null || \
-        kubectl patch kafka --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-    kubectl delete kafkanodepool --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
-        kubectl patch kafkanodepool --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+    # Remove Kafka resources in reverse dependency order.
+    # The operator must be running throughout so it can process CR finalizers.
+    # Order: leaf resources -> Kafka CR (wait) -> KafkaNodePools
+
+    # 1. Leaf resources first (topics, users)
+    echo_info "Removing Kafka topics and users..."
     kubectl delete kafkatopic --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
         kubectl patch kafkatopic --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
     kubectl delete kafkauser --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
         kubectl patch kafkauser --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+
+    # 2. Kafka CR — triggers operator to tear down brokers and controllers via finalizers
+    echo_info "Removing Kafka cluster (waiting for finalizers)..."
+    kubectl delete kafka --all -n "$KAFKA_NAMESPACE" --timeout 120s 2>/dev/null || \
+        kubectl patch kafka --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+
+    # 3. KafkaNodePools — safe to remove after the Kafka CR finalizers have completed
+    echo_info "Removing KafkaNodePool resources..."
+    kubectl delete kafkanodepool --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || \
+        kubectl patch kafkanodepool --all -n "$KAFKA_NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
 
     # Remove OLM resources (Subscription, CSV, OperatorGroup)
     local csv_name
