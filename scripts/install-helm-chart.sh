@@ -60,8 +60,7 @@ HELM_REPO_URL="https://insights-onprem.github.io/cost-onprem-chart"
 CHART_VERSION=${CHART_VERSION:-}  # Empty = latest; set to pin a version (e.g., "0.2.9")
 USE_LOCAL_CHART=${USE_LOCAL_CHART:-false}  # Set to true to use local chart instead of Helm repository
 LOCAL_CHART_PATH=${LOCAL_CHART_PATH:-../cost-onprem}  # Path to local chart directory
-STRIMZI_NAMESPACE=${STRIMZI_NAMESPACE:-}  # If set, use existing AMQ Streams operator in this namespace
-KAFKA_NAMESPACE=${KAFKA_NAMESPACE:-}  # If set, use existing Kafka cluster in this namespace
+KAFKA_NAMESPACE=${KAFKA_NAMESPACE:-}  # If set, look for operator and Kafka cluster in this namespace
 
 # Logging functions with level-based filtering
 log_debug() {
@@ -238,7 +237,7 @@ create_namespace() {
 }
 
 # Function to verify AMQ Streams and Kafka prerequisites
-verify_strimzi_and_kafka() {
+verify_kafka() {
     echo_info "Verifying AMQ Streams operator and Kafka cluster prerequisites..."
 
     # If user provided external Kafka bootstrap servers (env var or values file), skip verification
@@ -260,15 +259,15 @@ verify_strimzi_and_kafka() {
     # Determine which namespace to check
     local check_namespace="${KAFKA_NAMESPACE:-kafka}"
 
-    # Check if AMQ Streams / Strimzi operator exists
-    local strimzi_ns=""
+    # Check if AMQ Streams operator exists
+    local kafka_ns=""
 
     # Look for AMQ Streams operator in any namespace
-    strimzi_ns=$(kubectl get pods -A -l strimzi.io/kind=cluster-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
+    kafka_ns=$(kubectl get pods -A -l strimzi.io/kind=cluster-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
 
-    if [ -n "$strimzi_ns" ]; then
-        echo_success "Found AMQ Streams operator in namespace: $strimzi_ns"
-        check_namespace="$strimzi_ns"
+    if [ -n "$kafka_ns" ]; then
+        echo_success "Found AMQ Streams operator in namespace: $kafka_ns"
+        check_namespace="$kafka_ns"
     else
         echo_error "AMQ Streams operator not found in cluster"
         echo_info ""
@@ -1948,7 +1947,7 @@ main() {
     fi
 
     # Verify AMQ Streams operator and Kafka cluster are available
-    if ! verify_strimzi_and_kafka; then
+    if ! verify_kafka; then
         echo_error "AMQ Streams/Kafka prerequisites not met"
         exit 1
     fi

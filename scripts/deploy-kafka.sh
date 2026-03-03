@@ -45,7 +45,6 @@ KAFKA_ENVIRONMENT=${KAFKA_ENVIRONMENT:-dev}  # "dev" or "ocp"
 STORAGE_CLASS=${STORAGE_CLASS:-}  # Auto-detect if empty
 
 # Advanced options
-AMQ_STREAMS_NAMESPACE=${AMQ_STREAMS_NAMESPACE:-}  # If set, use existing AMQ Streams operator
 KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-}  # If set, use external Kafka (skip deployment)
 
 # Platform-specific configuration (auto-detected)
@@ -916,28 +915,14 @@ main() {
     if [ -n "$STORAGE_CLASS" ]; then
         echo_info "  Storage Class: $STORAGE_CLASS"
     fi
-    if [ -n "$AMQ_STREAMS_NAMESPACE" ]; then
-        echo_info "  Existing Operator: $AMQ_STREAMS_NAMESPACE"
-    fi
     echo ""
 
     check_prerequisites
 
-    if [ -n "$AMQ_STREAMS_NAMESPACE" ]; then
-        echo_info "Using existing AMQ Streams operator in namespace: $AMQ_STREAMS_NAMESPACE"
-        if ! verify_existing_operator "$AMQ_STREAMS_NAMESPACE"; then
-            exit 1
-        fi
-        if ! verify_existing_kafka "$AMQ_STREAMS_NAMESPACE"; then
-            exit 1
-        fi
-        KAFKA_NAMESPACE="$AMQ_STREAMS_NAMESPACE"
-    else
-        create_namespace
-        install_amq_streams_operator
-        deploy_kafka_cluster
-        create_kafka_topics
-    fi
+    create_namespace
+    install_amq_streams_operator
+    deploy_kafka_cluster
+    create_kafka_topics
 
     if validate_deployment; then
         display_summary
@@ -976,7 +961,6 @@ case "${1:-}" in
         echo "  AMQ_STREAMS_CHANNEL      OLM subscription channel (default: amq-streams-3.1.x)"
         echo "  KAFKA_ENVIRONMENT        Environment type: dev or ocp (default: dev)"
         echo "  STORAGE_CLASS            Storage class name (auto-detected if empty)"
-        echo "  AMQ_STREAMS_NAMESPACE    Use existing AMQ Streams operator in this namespace"
         echo ""
         echo "Examples:"
         echo "  # Deploy with default settings"
@@ -985,8 +969,8 @@ case "${1:-}" in
         echo "  # Deploy for OpenShift with custom storage"
         echo "  KAFKA_ENVIRONMENT=ocp STORAGE_CLASS=gp2 $0"
         echo ""
-        echo "  # Use existing AMQ Streams operator"
-        echo "  AMQ_STREAMS_NAMESPACE=existing-operator $0"
+        echo "  # Deploy into a specific namespace"
+        echo "  KAFKA_NAMESPACE=my-kafka $0"
         echo ""
         echo "  # Use existing Kafka on cluster (no deployment)"
         echo "  KAFKA_BOOTSTRAP_SERVERS=my-kafka-bootstrap.my-namespace:9092 $0"

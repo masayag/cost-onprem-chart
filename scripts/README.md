@@ -166,8 +166,8 @@ Deploy AMQ Streams (Streams for Apache Kafka) operator via OLM and a KRaft-based
 # Deploy for OpenShift with custom storage
 KAFKA_ENVIRONMENT=ocp ./deploy-kafka.sh
 
-# Use existing AMQ Streams operator
-AMQ_STREAMS_NAMESPACE=existing-operator ./deploy-kafka.sh
+# Deploy into a specific namespace
+KAFKA_NAMESPACE=my-kafka ./deploy-kafka.sh
 
 # Use existing external Kafka
 KAFKA_BOOTSTRAP_SERVERS=my-kafka:9092 ./deploy-kafka.sh
@@ -187,7 +187,6 @@ KAFKA_BOOTSTRAP_SERVERS=my-kafka:9092 ./deploy-kafka.sh
 - `KAFKA_ENVIRONMENT`: Environment type - `dev` or `ocp` (default: `dev`)
 - `STORAGE_CLASS`: Storage class name (auto-detected if empty)
 - `KAFKA_BOOTSTRAP_SERVERS`: Use external Kafka (skips deployment)
-- `AMQ_STREAMS_NAMESPACE`: Use existing AMQ Streams operator in this namespace
 
 ---
 

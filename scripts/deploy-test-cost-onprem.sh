@@ -706,7 +706,7 @@ main() {
                 SKIP_RHBK=true
                 shift
                 ;;
-            --skip-kafka|--skip-strimzi)
+            --skip-kafka)
                 SKIP_KAFKA=true
                 shift
                 ;;
