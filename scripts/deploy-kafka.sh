@@ -37,7 +37,8 @@ NC='\033[0m' # No Color
 LOG_LEVEL=${LOG_LEVEL:-WARN}
 
 # Configuration - AMQ Streams / Kafka settings
-KAFKA_NAMESPACE=${KAFKA_NAMESPACE:-kafka}
+OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-openshift-operators}  # Where the OLM Subscription lives
+KAFKA_NAMESPACE=${KAFKA_NAMESPACE:-kafka}                      # Where Kafka instances are deployed
 KAFKA_CLUSTER_NAME=${KAFKA_CLUSTER_NAME:-cost-onprem-kafka}
 KAFKA_VERSION=${KAFKA_VERSION:-4.1.0}
 AMQ_STREAMS_CHANNEL=${AMQ_STREAMS_CHANNEL:-amq-streams-3.1.x}
@@ -229,13 +230,14 @@ verify_existing_kafka() {
     return 0
 }
 
-# Function to install AMQ Streams operator via OLM
+# Function to install AMQ Streams operator via OLM.
+# The operator Subscription lives in OPERATOR_NAMESPACE (default: openshift-operators)
+# which already has the global-operators OperatorGroup, so the operator watches all namespaces.
+# Kafka instances are created in KAFKA_NAMESPACE (default: kafka).
 install_amq_streams_operator() {
     echo_header "INSTALLING AMQ STREAMS OPERATOR"
 
-    local target_namespace="$KAFKA_NAMESPACE"
-
-    # Check if there's already a compatible operator we can reuse
+    # Check if there's already a compatible operator running anywhere
     local existing_operator_ns
     existing_operator_ns=$(kubectl get pods -A -l strimzi.io/kind=cluster-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
 
@@ -244,8 +246,7 @@ install_amq_streams_operator() {
 
         if verify_existing_operator "$existing_operator_ns" 2>/dev/null; then
             echo_success "Existing AMQ Streams operator is compatible, reusing it"
-            target_namespace="$existing_operator_ns"
-            KAFKA_NAMESPACE="$target_namespace"
+            OPERATOR_NAMESPACE="$existing_operator_ns"
             return 0
         else
             echo_error "Existing operator in namespace '$existing_operator_ns' is not compatible"
@@ -256,41 +257,40 @@ install_amq_streams_operator() {
     fi
 
     echo_info "No existing AMQ Streams operator found, installing via OLM"
+    echo_info "Operator namespace: $OPERATOR_NAMESPACE"
 
-    # Check if there is already a Subscription for amq-streams in any namespace
+    # Check if there is already a Subscription for amq-streams
     local existing_sub_ns
     existing_sub_ns=$(kubectl get subscriptions.operators.coreos.com -A -o jsonpath='{range .items[?(@.spec.name=="amq-streams")]}{.metadata.namespace}{end}' 2>/dev/null || echo "")
     if [ -n "$existing_sub_ns" ]; then
         echo_info "Found existing AMQ Streams subscription in namespace: $existing_sub_ns"
         echo_info "Waiting for operator to become ready..."
-        target_namespace="$existing_sub_ns"
+        OPERATOR_NAMESPACE="$existing_sub_ns"
     else
-        # Create OperatorGroup (required for OLM to install into the namespace)
-        if ! kubectl get operatorgroup -n "$target_namespace" --no-headers 2>/dev/null | grep -q .; then
-            echo_info "Creating OperatorGroup in namespace: $target_namespace"
-            cat <<EOF | kubectl apply -f -
+        # The openshift-operators namespace has a global-operators OperatorGroup by default.
+        # If using a different namespace, verify an OperatorGroup exists.
+        if [ "$OPERATOR_NAMESPACE" != "openshift-operators" ]; then
+            if ! kubectl get operatorgroup -n "$OPERATOR_NAMESPACE" --no-headers 2>/dev/null | grep -q .; then
+                echo_info "Creating OperatorGroup in namespace: $OPERATOR_NAMESPACE"
+                cat <<EOF | kubectl apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
   name: amq-streams-operatorgroup
-  namespace: $target_namespace
-spec:
-  targetNamespaces:
-    - $target_namespace
+  namespace: $OPERATOR_NAMESPACE
+spec: {}
 EOF
-            echo_success "✓ OperatorGroup created"
-        else
-            echo_info "OperatorGroup already exists in namespace: $target_namespace"
+                echo_success "✓ OperatorGroup created"
+            fi
         fi
 
-        # Create Subscription
         echo_info "Creating AMQ Streams subscription (channel: $AMQ_STREAMS_CHANNEL)..."
         cat <<EOF | kubectl apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
   name: amq-streams
-  namespace: $target_namespace
+  namespace: $OPERATOR_NAMESPACE
 spec:
   channel: $AMQ_STREAMS_CHANNEL
   installPlanApproval: Automatic
@@ -308,11 +308,11 @@ EOF
 
     while [ $elapsed -lt $timeout ]; do
         local csv_name
-        csv_name=$(kubectl get subscriptions.operators.coreos.com amq-streams -n "$target_namespace" -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
+        csv_name=$(kubectl get subscriptions.operators.coreos.com amq-streams -n "$OPERATOR_NAMESPACE" -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
 
         if [ -n "$csv_name" ]; then
             local csv_phase
-            csv_phase=$(kubectl get csv "$csv_name" -n "$target_namespace" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            csv_phase=$(kubectl get csv "$csv_name" -n "$OPERATOR_NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
 
             if [ "$csv_phase" = "Succeeded" ]; then
                 echo_success "✓ AMQ Streams operator installed (CSV: $csv_name)"
@@ -331,7 +331,7 @@ EOF
 
     if [ $elapsed -ge $timeout ]; then
         echo_error "Timeout waiting for AMQ Streams operator to install"
-        echo_error "Check: kubectl get subscriptions.operators.coreos.com amq-streams -n $target_namespace -o yaml"
+        echo_error "Check: kubectl get subscriptions.operators.coreos.com amq-streams -n $OPERATOR_NAMESPACE -o yaml"
         exit 1
     fi
 
@@ -341,8 +341,8 @@ EOF
     elapsed=0
 
     while [ $elapsed -lt $timeout ]; do
-        if kubectl get pod -n "$target_namespace" -l strimzi.io/kind=cluster-operator --no-headers 2>/dev/null | grep -q .; then
-            if kubectl wait --for=condition=ready pod -l strimzi.io/kind=cluster-operator -n "$target_namespace" --timeout=10s >/dev/null 2>&1; then
+        if kubectl get pod -n "$OPERATOR_NAMESPACE" -l strimzi.io/kind=cluster-operator --no-headers 2>/dev/null | grep -q .; then
+            if kubectl wait --for=condition=ready pod -l strimzi.io/kind=cluster-operator -n "$OPERATOR_NAMESPACE" --timeout=10s >/dev/null 2>&1; then
                 echo_success "✓ AMQ Streams operator pod is ready"
                 break
             fi
@@ -614,10 +614,10 @@ validate_deployment() {
         validation_errors=$((validation_errors + 1))
     fi
 
-    # Check AMQ Streams operator
-    if kubectl get pods -n "$KAFKA_NAMESPACE" -l strimzi.io/kind=cluster-operator --no-headers 2>/dev/null | grep -q .; then
+    # Check AMQ Streams operator (runs in OPERATOR_NAMESPACE)
+    if kubectl get pods -n "$OPERATOR_NAMESPACE" -l strimzi.io/kind=cluster-operator --no-headers 2>/dev/null | grep -q .; then
         local ready
-        ready=$(kubectl get pods -n "$KAFKA_NAMESPACE" -l strimzi.io/kind=cluster-operator -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+        ready=$(kubectl get pods -n "$OPERATOR_NAMESPACE" -l strimzi.io/kind=cluster-operator -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
         if [ "$ready" = "True" ]; then
             echo_success "✓ AMQ Streams operator is running"
         else
@@ -683,7 +683,8 @@ display_summary() {
 
     echo_info "AMQ Streams / Kafka Deployment Information:"
     echo_info "  Platform: $PLATFORM"
-    echo_info "  Namespace: $KAFKA_NAMESPACE"
+    echo_info "  Operator Namespace: $OPERATOR_NAMESPACE"
+    echo_info "  Kafka Namespace: $KAFKA_NAMESPACE"
     echo_info "  Kafka Cluster: $KAFKA_CLUSTER_NAME"
     echo_info "  Kafka Version: $KAFKA_VERSION"
     echo_info "  AMQ Streams Channel: $AMQ_STREAMS_CHANNEL"
@@ -722,7 +723,7 @@ display_summary() {
     echo_info "Troubleshooting:"
     echo_info "  Kafka logs: kubectl logs -n $KAFKA_NAMESPACE -l strimzi.io/name=${KAFKA_CLUSTER_NAME}-broker"
     echo_info "  Controller logs: kubectl logs -n $KAFKA_NAMESPACE -l strimzi.io/name=${KAFKA_CLUSTER_NAME}-controller"
-    echo_info "  Operator logs: kubectl logs -n $KAFKA_NAMESPACE -l strimzi.io/kind=cluster-operator"
+    echo_info "  Operator logs: kubectl logs -n $OPERATOR_NAMESPACE -l strimzi.io/kind=cluster-operator"
     echo ""
 
     echo_success "Kafka infrastructure deployment completed successfully!"
@@ -784,18 +785,21 @@ cleanup_deployment() {
     kubectl delete kafkanodepool --all -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
     wait_for_cr_deletion kafkanodepool "$KAFKA_NAMESPACE" 60
 
-    # 4. Remove OLM resources (Subscription, CSV, OperatorGroup) — operator no longer needed
-    echo_info "Removing AMQ Streams operator..."
+    # 4. Remove OLM resources (Subscription, CSV) from the operator namespace
+    echo_info "Removing AMQ Streams operator from namespace: $OPERATOR_NAMESPACE..."
     local csv_name
-    csv_name=$(kubectl get subscriptions.operators.coreos.com amq-streams -n "$KAFKA_NAMESPACE" -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
+    csv_name=$(kubectl get subscriptions.operators.coreos.com amq-streams -n "$OPERATOR_NAMESPACE" -o jsonpath='{.status.installedCSV}' 2>/dev/null || echo "")
 
-    kubectl delete subscriptions.operators.coreos.com amq-streams -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
+    kubectl delete subscriptions.operators.coreos.com amq-streams -n "$OPERATOR_NAMESPACE" --timeout 30s 2>/dev/null || true
 
     if [ -n "$csv_name" ]; then
-        kubectl delete csv "$csv_name" -n "$KAFKA_NAMESPACE" --timeout 60s 2>/dev/null || true
+        kubectl delete csv "$csv_name" -n "$OPERATOR_NAMESPACE" --timeout 60s 2>/dev/null || true
     fi
 
-    kubectl delete operatorgroup amq-streams-operatorgroup -n "$KAFKA_NAMESPACE" --timeout 30s 2>/dev/null || true
+    # Only delete OperatorGroup if we created it (not the built-in global-operators)
+    if [ "$OPERATOR_NAMESPACE" != "openshift-operators" ]; then
+        kubectl delete operatorgroup amq-streams-operatorgroup -n "$OPERATOR_NAMESPACE" --timeout 30s 2>/dev/null || true
+    fi
 
     # Also clean up any legacy Helm-based Strimzi installations
     kubectl get pods -A -l strimzi.io/kind=cluster-operator --no-headers 2>/dev/null | while read -r namespace pod_name rest; do
@@ -886,7 +890,8 @@ main() {
 
     echo_info "This script will deploy AMQ Streams operator and Kafka cluster (KRaft mode)"
     echo_info "Deployment Configuration:"
-    echo_info "  Namespace: $KAFKA_NAMESPACE"
+    echo_info "  Operator Namespace: $OPERATOR_NAMESPACE"
+    echo_info "  Kafka Namespace: $KAFKA_NAMESPACE"
     echo_info "  Cluster Name: $KAFKA_CLUSTER_NAME"
     echo_info "  Kafka Version: $KAFKA_VERSION"
     echo_info "  AMQ Streams Channel: $AMQ_STREAMS_CHANNEL"
@@ -932,9 +937,10 @@ case "${1:-}" in
         echo "  help             Show this help message"
         echo ""
         echo "Environment Variables:"
-        echo "  KAFKA_BOOTSTRAP_SERVERS  Bootstrap servers for existing Kafka on cluster (skips deployment)"
-        echo "  KAFKA_NAMESPACE          Target namespace (default: kafka)"
-        echo "  KAFKA_CLUSTER_NAME       Kafka cluster name (default: cost-onprem-kafka)"
+        echo "  KAFKA_BOOTSTRAP_SERVERS    Bootstrap servers for existing Kafka on cluster (skips deployment)"
+        echo "  OPERATOR_NAMESPACE         Namespace for AMQ Streams operator (default: openshift-operators)"
+        echo "  KAFKA_NAMESPACE            Namespace for Kafka instances (default: kafka)"
+        echo "  KAFKA_CLUSTER_NAME         Kafka cluster name (default: cost-onprem-kafka)"
         echo "  KAFKA_VERSION            Kafka version (default: 4.1.0)"
         echo "  AMQ_STREAMS_CHANNEL      OLM subscription channel (default: amq-streams-3.1.x)"
         echo "  STORAGE_CLASS            Storage class name (auto-detected if empty)"

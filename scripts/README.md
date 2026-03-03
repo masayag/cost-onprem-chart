@@ -180,7 +180,8 @@ KAFKA_BOOTSTRAP_SERVERS=my-kafka:9092 ./deploy-kafka.sh
 ```
 
 **Environment variables:**
-- `KAFKA_NAMESPACE`: Target namespace (default: `kafka`)
+- `OPERATOR_NAMESPACE`: Namespace for AMQ Streams operator Subscription (default: `openshift-operators`)
+- `KAFKA_NAMESPACE`: Namespace for Kafka instances (default: `kafka`)
 - `KAFKA_CLUSTER_NAME`: Kafka cluster name (default: `cost-onprem-kafka`)
 - `KAFKA_VERSION`: Kafka version (default: `4.1.0`)
 - `AMQ_STREAMS_CHANNEL`: OLM subscription channel (default: `amq-streams-3.1.x`)
