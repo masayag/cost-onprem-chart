@@ -100,9 +100,10 @@ release you mirror and install. The `additionalImages` section lists images that
 [Discovering container images](#discovering-container-images)); keep it aligned
 with `.github/workflows/lint-and-validate.yml`.
 
-For the prerequisites sample, set `mirror.operators[].catalog` to
-`registry.redhat.io/redhat/redhat-operator-index:vX.Y` matching your OpenShift
-minor version, and adjust operator package channels if your release differs.
+The prerequisites sample defaults to OpenShift **4.20**
+(`registry.redhat.io/redhat/redhat-operator-index:v4.20`). If your cluster is
+another minor version, change that catalog tag (and operator channels, including
+optional ODF) to match.
 
 Copy one of the examples to `imageset-config.yaml` (or keep any path you
 prefer and pass it to `oc-mirror -c`).

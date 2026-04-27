@@ -6,13 +6,12 @@
 # them only if you deploy ODF for S3-compatible storage on the cluster.
 #
 # Before mirroring:
-# 1. Set the redhat-operator-index image tag to your OpenShift minor version,
-#    e.g. v4.16 for OpenShift 4.16 (must match the cluster you install on).
+# 1. This sample targets OpenShift 4.20 (redhat-operator-index:v4.20). Change
+#    the catalog tag if your cluster is a different minor version.
 # 2. Confirm package channels exist on your version (OperatorHub on a
 #    connected cluster, or Red Hat documentation for disconnected mirroring).
-# 3. Uncomment the odf-operator entry only when mirroring ODF; channel names
-#    differ by OCP release (replace stable-4.16 with the channel shown for your
-#    version, e.g. stable-4.17).
+# 3. Uncomment the odf-operator entry only when mirroring ODF; verify the
+#    channel name in OperatorHub for your release (example uses stable-4.20).
 #
 # Usage:
 #   oc-mirror --v2 -c imageset-config-cost-onprem-with-prerequisites.sample.yaml file://mirror-output
@@ -30,7 +29,7 @@ mirror:
           - name: cost-onprem
             version: "0.2.20-rc3"
   operators:
-    - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.16
+    - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.20
       packages:
         - name: amq-streams
           channels:
@@ -42,7 +41,7 @@ mirror:
         # channel to the value offered for your OpenShift version.
         # - name: odf-operator
         #   channels:
-        #     - name: stable-4.16
+        #     - name: stable-4.20
   additionalImages:
     - name: quay.io/insights-onprem/postgresql:16
     # PostgreSQL Deployment created by scripts/deploy-rhbk.sh for Keycloak DB:
