@@ -498,8 +498,8 @@ kruize:
 # Uses insights-ingress-go which requires INGRESS_* prefixed environment variables
 ingress:
   image:
-    repository: quay.io/insights-onprem/insights-ingress-go
-    tag: "c87b25ca"
+    repository: quay.io/redhat-user-workloads/hcc-integrations-tenant/ingress
+    tag: "3a7a2cf"
     pullPolicy: Always
 
   # Server configuration
