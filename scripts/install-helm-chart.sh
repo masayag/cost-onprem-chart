@@ -132,7 +132,10 @@ storage_credentials_secret_name() {
 # True if endpoint hostname is AWS S3 (virtual-hosted style; do not force path-style addressing)
 is_aws_s3_endpoint_host() {
     case "$1" in
+        # AWS S3 endpoints
         *.amazonaws.com) return 0 ;;
+        # Exclude S4 test endpoints and other local services
+        s4.*svc.cluster.local|s4.*svc|*.openshift-storage.svc*) return 1 ;;
         *) return 1 ;;
     esac
 }
@@ -783,6 +786,14 @@ create_s3_buckets() {
     fi
 
     if [ -z "$access_key" ] || [ -z "$secret_key" ]; then
+        # Check if this might be a CI/S4 environment where credentials are managed differently
+        if [ -n "${S3_ENDPOINT:-}" ] && [[ "$S3_ENDPOINT" == *"svc.cluster.local"* ]]; then
+            echo_warning "S3 credentials not found for cluster-local endpoint: $S3_ENDPOINT"
+            echo_warning "This may be a CI/S4 environment. Skipping bucket creation."
+            echo_info "If buckets don't exist, they may need to be created manually or by S4 setup."
+            return 0
+        fi
+
         echo_error "S3 credentials not found in secret $secret_name or environment variables"
         echo_error "Cannot proceed without S3 storage. Aborting installation."
         echo_error ""
