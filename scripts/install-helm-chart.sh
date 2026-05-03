@@ -132,7 +132,7 @@ storage_credentials_secret_name() {
 # True if endpoint hostname is AWS S3 (virtual-hosted style; do not force path-style addressing)
 is_aws_s3_endpoint_host() {
     case "$1" in
-        *amazonaws.com*) return 0 ;;
+        *.amazonaws.com) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -191,8 +191,25 @@ resolve_install_bucket_name() {
     echo "$hard_default"
 }
 
-# Resolve final bucket names (values + env), validate AWS global uniqueness, export for Helm and bucket job.
-# Args: $1 = endpoint hostname (for AWS detection only)
+validate_s3_bucket_name() {
+    local name="$1"
+    local label="$2"
+    local len=${#name}
+    if [ "$len" -lt 3 ] || [ "$len" -gt 63 ]; then
+        echo_error "S3 bucket name '$name' ($label) must be 3-63 characters (got $len)"
+        return 1
+    fi
+    if echo "$name" | grep -qE '[^a-z0-9.-]'; then
+        echo_error "S3 bucket name '$name' ($label) contains invalid characters (allowed: a-z, 0-9, hyphens, dots)"
+        return 1
+    fi
+    if echo "$name" | grep -qE '^-|-$'; then
+        echo_error "S3 bucket name '$name' ($label) must not start or end with a hyphen"
+        return 1
+    fi
+    return 0
+}
+
 compute_and_export_install_bucket_names() {
     local endpoint_host="${1:-}"
     local ingress_bucket koku_bucket ros_bucket
@@ -209,6 +226,15 @@ compute_and_export_install_bucket_names() {
     [ -n "${S3_BUCKET_INGRESS:-}" ] && ingress_bucket="$S3_BUCKET_INGRESS"
     [ -n "${S3_BUCKET_KOKU:-}" ] && koku_bucket="$S3_BUCKET_KOKU"
     [ -n "${S3_BUCKET_ROS:-}" ] && ros_bucket="$S3_BUCKET_ROS"
+
+    local bucket_valid=true
+    validate_s3_bucket_name "$ingress_bucket" "ingress" || bucket_valid=false
+    validate_s3_bucket_name "$koku_bucket" "koku" || bucket_valid=false
+    validate_s3_bucket_name "$ros_bucket" "ros" || bucket_valid=false
+    if [ "$bucket_valid" = "false" ]; then
+        echo_error "Fix bucket names via S3_BUCKET_PREFIX, S3_BUCKET_INGRESS/KOKU/ROS, or values file"
+        exit 1
+    fi
 
     if is_aws_s3_endpoint_host "$endpoint_host"; then
         if [ "$ingress_bucket" = "insights-upload-perma" ] || \
@@ -816,26 +842,9 @@ create_s3_buckets() {
         if [ -n "$s3_ep" ] && [ "$s3_ep" != "null" ]; then
             endpoint_host=$(parse_s3_host "$s3_ep")
 
-            # Auto-enable SSL verification for AWS endpoints unless explicitly disabled
             if is_aws_s3_endpoint_host "$endpoint_host" && [ -z "${S3_VERIFY_SSL:-}" ]; then
                 verify_ssl="true"
                 echo_info "  Auto-enabled SSL verification for AWS S3 endpoint (override with S3_VERIFY_SSL=false)"
-            fi
-
-            # Validate that S3_REGION is explicitly set for AWS endpoints
-            if is_aws_s3_endpoint_host "$endpoint_host" && [ -z "${S3_REGION:-}" ]; then
-                echo_error "S3_REGION is required for AWS S3 endpoints (detected from values file)"
-                echo_error "AWS S3 requires explicit region configuration for SigV4 authentication."
-                echo_error ""
-                echo_error "Solution: Set S3_REGION environment variable or objectStorage.s3.region in values file:"
-                echo_error "  export S3_REGION=us-east-1"
-                echo_error "Or in ${src_values##*/}:"
-                echo_error "  objectStorage:"
-                echo_error "    s3:"
-                echo_error "      region: us-east-1"
-                echo_error ""
-                echo_error "Common AWS regions: us-east-1, us-west-2, eu-west-1, ap-southeast-1"
-                exit 1
             fi
 
             if [ "$s3_ssl" = "true" ]; then
@@ -877,22 +886,29 @@ create_s3_buckets() {
             exit 1
         fi
 
-        # Validate region/endpoint consistency for common AWS endpoints
+        local expected_region=""
         case "$endpoint_host" in
+            s3.dualstack.*.amazonaws.com)
+                expected_region=$(echo "$endpoint_host" | sed 's/s3\.dualstack\.\([^.]*\)\.amazonaws\.com/\1/')
+                ;;
+            s3-*.*.amazonaws.com)
+                expected_region=$(echo "$endpoint_host" | sed 's/s3-[^.]*\.\([^.]*\)\.amazonaws\.com/\1/')
+                ;;
             s3.*.amazonaws.com)
-                local expected_region
                 expected_region=$(echo "$endpoint_host" | sed 's/s3\.\([^.]*\)\.amazonaws\.com/\1/')
-                if [ "$expected_region" != "${S3_REGION}" ] && [ "$expected_region" != "amazonaws" ]; then
-                    echo_warning "Region mismatch: S3_REGION=${S3_REGION} but endpoint suggests ${expected_region}"
-                    echo_warning "This may cause SigV4 authentication failures"
-                fi
                 ;;
         esac
+        if [ -n "$expected_region" ] && [ "$expected_region" != "${S3_REGION}" ]; then
+            echo_warning "Region mismatch: S3_REGION=${S3_REGION} but endpoint suggests ${expected_region}"
+            echo_warning "This may cause SigV4 authentication failures"
+        fi
     fi
 
     local aws_region
     aws_region=$(resolve_s3_cli_region)
-    echo_info "  AWS CLI region for bucket job: $aws_region"
+    if is_aws_s3_endpoint_host "$endpoint_host"; then
+        echo_info "  AWS CLI region for bucket job: $aws_region"
+    fi
 
     compute_and_export_install_bucket_names "$endpoint_host"
     local bucket_list="${RESOLVED_S3_BUCKET_INGRESS} ${RESOLVED_S3_BUCKET_KOKU} ${RESOLVED_S3_BUCKET_ROS}"

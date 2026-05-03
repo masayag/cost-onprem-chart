@@ -513,51 +513,37 @@ def s3_config(cluster_config: ClusterConfig) -> Optional[S3Config]:
     )
 
 
+def _resolve_deployed_bucket(
+    cluster_config: ClusterConfig,
+    deployment_suffix: str,
+    env_var_name: str,
+) -> Optional[str]:
+    log = logging.getLogger(__name__)
+    try:
+        result = run_oc_command([
+            "get", "deployment", f"{cluster_config.helm_release_name}-{deployment_suffix}",
+            "-n", cluster_config.namespace,
+            "-o", f"jsonpath={{.spec.template.spec.containers[*].env[?(@.name=='{env_var_name}')].value}}",
+        ], check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split()[0]
+    except Exception as exc:
+        log.warning("Failed to resolve %s from %s: %s", env_var_name, deployment_suffix, exc)
+    return None
+
+
 def get_actual_bucket_names(cluster_config: ClusterConfig) -> List[str]:
-    """Extract actual bucket names from deployed pod environment variables.
-
-    Returns the bucket names that are actually configured in the deployment,
-    which may differ from chart defaults (e.g., with S3_BUCKET_PREFIX).
-    """
+    lookups = [
+        ("koku-api", "REQUESTED_BUCKET"),
+        ("koku-api", "REQUESTED_ROS_BUCKET"),
+        ("ingress", "INGRESS_STAGEBUCKET"),
+    ]
     bucket_names = []
+    for deployment_suffix, env_var in lookups:
+        name = _resolve_deployed_bucket(cluster_config, deployment_suffix, env_var)
+        if name:
+            bucket_names.append(name)
 
-    # Get Koku bucket from koku-api deployment
-    try:
-        result = run_oc_command([
-            "get", "deployment", f"{cluster_config.helm_release_name}-koku-api",
-            "-n", cluster_config.namespace,
-            "-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='REQUESTED_BUCKET')].value}"
-        ], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            bucket_names.append(result.stdout.strip())
-    except Exception:
-        pass
-
-    # Get ROS bucket from koku-api deployment
-    try:
-        result = run_oc_command([
-            "get", "deployment", f"{cluster_config.helm_release_name}-koku-api",
-            "-n", cluster_config.namespace,
-            "-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='REQUESTED_ROS_BUCKET')].value}"
-        ], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            bucket_names.append(result.stdout.strip())
-    except Exception:
-        pass
-
-    # Get Ingress bucket from ingress deployment
-    try:
-        result = run_oc_command([
-            "get", "deployment", f"{cluster_config.helm_release_name}-ingress",
-            "-n", cluster_config.namespace,
-            "-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='INGRESS_STAGEBUCKET')].value}"
-        ], check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            bucket_names.append(result.stdout.strip())
-    except Exception:
-        pass
-
-    # Fallback to defaults if no buckets found (shouldn't happen in normal deployment)
     if not bucket_names:
         bucket_names = ["koku-bucket", "ros-data", "insights-upload-perma"]
 
